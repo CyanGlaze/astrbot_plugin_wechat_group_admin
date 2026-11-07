@@ -179,10 +179,10 @@ class WechatGroupAdmin(Star):
 
         WebUI 自带配置页因此只需一个入口，所有参数在插件管理面板里维护。
         """
-        o = self._opts.get("options")
+        o = self.config.get("options")
         if not isinstance(o, dict):
             o = {}
-            self._opts["options"] = o
+            self.config["options"] = o
         return o
 
     @staticmethod
