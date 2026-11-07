@@ -67,7 +67,7 @@
   "at_schedules": {
     "type": "template_list",
     "description": "⏰ 定时艾特规则（在这里可视化增删，保存后立即生效）",
-    "hint": "每条 = 群 + 重复方式（每天/每周勾星期）+ 几点 + 艾特对象 + 内容。聊天里用 /添加艾特任务、/添加艾特成员 创建的规则会自动写回这里，两边一一对应；/删除艾特任务 的序号就是这里的规则序号。保存立即生效。",
+    "hint": "每条 = 群 + 重复方式（每天/每周勾星期/一次）+ 几点 + 艾特对象 + 内容。聊天里用 /添加艾特任务、/添加艾特成员 创建的规则会自动写回这里，两边一一对应；/删除艾特任务 的序号就是这里的规则序号。保存立即生效。",
     "default": [],
     "templates": {
       "at_schedule": {
@@ -91,11 +91,12 @@
             "type": "string",
             "options": [
               "daily",
-              "weekly"
+              "weekly",
+              "once"
             ],
             "default": "daily",
             "description": "重复方式",
-            "hint": "daily = 每天都艾特；weekly = 只在下面勾选的星期几艾特。"
+            "hint": "daily=每天；weekly=按勾选的星期；once=只执行一次（触发后自动停用）。"
           },
           "wd_mon": {
             "type": "bool",
@@ -222,11 +223,12 @@
             "type": "string",
             "options": [
               "daily",
-              "weekly"
+              "weekly",
+              "once"
             ],
             "default": "daily",
             "description": "重复方式",
-            "hint": "daily=每天；weekly=按下面勾选的星期。"
+            "hint": "daily=每天；weekly=按勾选的星期；once=只执行一次（触发后自动停用）。"
           },
           "wd_mon": {
             "type": "bool",

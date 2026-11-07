@@ -355,6 +355,8 @@ class WechatGroupAdmin(Star):
                     continue
                 self._fired.add(fire_key)
                 await self._run_atall(task)
+                if task.get("repeat") == "once":
+                    await self._disable_at_rule_once(task)
             except Exception as e:
                 logger.error(f"[群管] 定时任务执行失败：{e}")
 
@@ -372,6 +374,8 @@ class WechatGroupAdmin(Star):
                 await self._send_chain_starter(
                     rule["group_id"], rule["topic"], rule.get("first_item", "")
                 )
+                if rule.get("repeat") == "once":
+                    await self._disable_chain_rule_once(rule)
             except Exception as e:
                 logger.error(f"[群管] 定时发起接龙失败：{e}")
 
@@ -476,6 +480,7 @@ class WechatGroupAdmin(Star):
                     "id": f"{i}_{j}", "source": "cfg", "group_id": gid,
                     # time 里自带星期表达式（旧写法）优先，否则用面板勾选
                     "hour": h, "minute": m, "day_of_week": dow or dow_expr,
+                    "repeat": str(r.get("repeat") or "daily").lower(),
                     "target": "members" if r.get("target") == "members" else "all",
                     "members": members,
                     "content": str(r.get("content") or ""),
@@ -505,8 +510,38 @@ class WechatGroupAdmin(Star):
                     "id": f"{i}_{j}", "group_id": gid, "topic": topic,
                     "first_item": str(r.get("first_item") or "").strip(),
                     "hour": h, "minute": m, "day_of_week": dow or dow_expr,
+                    "repeat": str(r.get("repeat") or "daily").lower(),
                 })
         return out
+
+    async def _disable_at_rule_once(self, task: Dict[str, Any]):
+        """一次性定时@触发后，把来源面板规则置为停用并持久化，避免重复触发。"""
+        try:
+            i = int(str(task.get("id", "")).split("_")[0])
+            rules = self.config.get("at_schedules") or []
+            if not (0 <= i < len(rules)):
+                return
+            rules[i]["enabled"] = False
+            self.config["at_schedules"] = rules
+            self._load_state_from_config()   # 重建内存镜像（自动排除已停用规则）
+            await self._save_config()
+            logger.info(f"[群管] 一次性定时任务 #{i + 1} 已触发并自动停用")
+        except Exception as e:
+            logger.error(f"[群管] 停用一次性定时任务失败：{e}")
+
+    async def _disable_chain_rule_once(self, rule: Dict[str, Any]):
+        """一次性接龙引子触发后，停用来源面板规则并持久化。"""
+        try:
+            i = int(str(rule.get("id", "")).split("_")[0])
+            rules = self.config.get("chain_starters") or []
+            if not (0 <= i < len(rules)):
+                return
+            rules[i]["enabled"] = False
+            self.config["chain_starters"] = rules
+            await self._save_config()
+            logger.info(f"[群管] 一次性接龙任务 #{i + 1} 已触发并自动停用")
+        except Exception as e:
+            logger.error(f"[群管] 停用一次性接龙任务失败：{e}")
 
     @staticmethod
     def _chain_starter_text(topic: str, first_item: str = "") -> str:
@@ -1026,10 +1061,13 @@ class WechatGroupAdmin(Star):
         lines = ["📋 定时提醒规则（与 WebUI 配置面板一一对应）："]
         wd_names = "一二三四五六日"
         for i, r in enumerate(rules, 1):
-            if str(r.get("repeat") or "daily") == "weekly":
+            rep = str(r.get("repeat") or "daily").lower()
+            if rep == "weekly":
                 picked = "".join(wd_names[j] for j, k in enumerate(self._WD_KEYS)
                                  if r.get(k) is True)
                 when = f"每周({picked or '未勾选'}) {r.get('time', '')}"
+            elif rep == "once":
+                when = f"一次 {r.get('time', '')}"
             else:
                 when = f"每天 {r.get('time', '')}"
             who = "@成员 " + str(r.get("members") or "") \
