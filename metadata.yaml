@@ -2,7 +2,7 @@ name: astrbot_plugin_wechat_group_admin
 display_name: 微信群管理
 desc: 微信群管理（wechat_agent 适配器）：WebUI 面板可视化配置定时@与自动接龙、退群入群明细监控，以及建群/改群名/拉人/踢人/退群/清公告/改群内昵称/置顶/免打扰。
 short_desc: 面板化定时@、自动接龙助手、退群监控、群设置变更（wechat_agent）
-version: v1.6.0
+version: v1.7.0
 author: 青璃
 repo: https://github.com/CyanGlaze/astrbot_plugin_wechat_group_admin
 astrbot_version: ">=4.16"

@@ -33,6 +33,7 @@ import asyncio
 import re
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -41,6 +42,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.event.filter import EventMessageType, PermissionType
 from astrbot.api.message_components import At, AtAll, Plain
 from astrbot.api.star import Context, Star, register
+from astrbot.api.web import json_response, request as web_request
 
 PLATFORM_NAMES = {"wechat_agent", "wechat", "gewechat"}
 KV_MONITORED = "wxga_monitored"
@@ -140,7 +142,7 @@ def _parse_dow(expr: Optional[str]) -> Set[int]:
     "astrbot_plugin_wechat_group_admin",
     "青璃",
     "微信群管理：面板化定时@/发起官方接龙、命令双向同步、群设置变更（wechat_agent 适配器）",
-    "1.6.0",
+    "1.7.0",
     "https://github.com/AstrBotDevs/AstrBot",
 )
 class WechatGroupAdmin(Star):
@@ -152,6 +154,7 @@ class WechatGroupAdmin(Star):
         self.groups: Dict[str, Dict[str, Any]] = {}      # gid -> {umo, thread_id, name}
         self.snapshots: Dict[str, Dict[str, str]] = {}   # gid -> {member_id: 群昵称}
         self.snapshot_source: Dict[str, str] = {}        # gid -> 上次用的成员接口名
+        self._pending_diff: Dict[str, Dict[str, Any]] = {}  # gid -> 待确认差比（防误报）
         self.monitored: List[str] = []
         self.schedules: List[Dict[str, Any]] = []
         self.notify_group: str = ""
@@ -160,7 +163,9 @@ class WechatGroupAdmin(Star):
         self._warned_no_client = False
         self._last_send_error: str = ""
         self._pending: Dict[str, Dict[str, Any]] = {}   # 破坏性操作的待确认记录
+        self._events: deque = deque(maxlen=500)         # 退群/入群/拦截事件（内存，重启清空）
         self._loop_task: Optional[asyncio.Task] = None
+        self._register_web_apis()                        # views/dashboard 管理页后端 API
         asyncio.create_task(self._async_init())
 
     # ===================================================================
@@ -691,6 +696,13 @@ class WechatGroupAdmin(Star):
             prev = self.snapshots.get(gid)
             prev_source = self.snapshot_source.get(gid)
             rebuild = prev is None
+            if not rebuild and len(curr) < len(prev) * 0.7:
+                # 防线1：名单远小于基线 → 多半是接口截断。整轮跳过：不播报、不更新基线、不动候选。
+                logger.warning(
+                    f"[群管] 群 {gid} 本轮成员数 {len(curr)} 远少于基线 {len(prev)}，"
+                    "疑似接口截断，跳过本轮（不播报不更新基线）。"
+                )
+                continue
             if not rebuild and prev_source and source and prev_source != source:
                 # 修正：守护进程会在 group_lookup / group_members 之间来回切换。
                 # 旧逻辑一换来源就重建基线，导致成员变动被吞掉、监控永不报警。
@@ -706,26 +718,200 @@ class WechatGroupAdmin(Star):
             if rebuild:
                 self.snapshots[gid] = curr
                 self.snapshot_source[gid] = source
+                self._pending_diff.pop(gid, None)
                 logger.info(f"[群管] 群 {gid} 建立成员基线：{len(curr)} 人（来源 {source}）")
                 continue
 
-            left = [w for w in prev if w not in curr]
-            joined = [w for w in curr if w not in prev]
-            self.snapshots[gid] = curr
-            self.snapshot_source[gid] = source
+            left = {w for w in prev if w not in curr}
+            joined = {w for w in curr if w not in prev}
+
+            if not left and not joined:
+                self._pending_diff.pop(gid, None)
+                self.snapshots[gid] = curr
+                self.snapshot_source[gid] = source
+                continue
+
+            pend = self._pending_diff.get(gid) or {}
+            confirm_left = set(pend.get("left") or ()) & left
+            confirm_joined = set(pend.get("joined") or ()) & joined
+
+            # 防线3：单轮大规模变动（≥30%）不可信（接口口径漂移/截断），拦截不播报；
+            # 连续 3 轮仍如此才接受现实、重建基线。
+            cap = max(1, int(len(prev) * 0.3))
+            if len(confirm_left) >= cap or len(confirm_joined) >= cap:
+                hits = int(pend.get("hits") or 0) + 1
+                self._pending_diff[gid] = {"left": left, "joined": joined, "hits": hits}
+                if hits >= 3:
+                    self.snapshots[gid] = curr
+                    self.snapshot_source[gid] = source
+                    self._pending_diff.pop(gid, None)
+                    logger.warning(
+                        f"[群管] 群 {gid} 连续 {hits} 轮大规模成员变动"
+                        f"（缺 {len(left)}/增 {len(joined)}），接受现实并重建基线 {len(curr)} 人。"
+                    )
+                else:
+                    logger.warning(
+                        f"[群管] 群 {gid} 疑似异常差比（缺 {len(left)}/增 {len(joined)}，"
+                        f"基线 {len(prev)}），已拦截不播报，待下轮确认。"
+                    )
+                    self._record_event(
+                        gid, info.get("name") or gid, "blocked",
+                        f"疑似误报已拦截（缺{len(left)}/增{len(joined)}）", "",
+                    )
+                continue
+
+            if not confirm_left and not confirm_joined:
+                # 防线2：首次发现差比 → 只记候选，下一轮仍缺/仍在才播报（防接口抖动误报）。
+                self._pending_diff[gid] = {"left": left, "joined": joined, "hits": 1}
+                logger.debug(
+                    f"[群管] 群 {gid} 成员变动候选（缺 {len(left)}/增 {len(joined)}），待下轮确认。"
+                )
+                continue
+
             gname = info.get("name") or gid
             tvars = _time_vars()
-
-            for w in left:
+            for w in sorted(confirm_left):
                 nick = prev.get(w, w)
                 text = self._fmt(leave_tpl, nickname=nick, wxid=w, group=gname, **tvars)
                 await self._send_to_group(gid, [Plain(text)])
                 logger.info(f"[群管] 退群 -> 群 {gid} / {nick}({w})")
-            for w in joined:
+                self._record_event(gid, gname, "leave", nick, w)
+            for w in sorted(confirm_joined):
                 nick = curr.get(w, w)
                 text = self._fmt(join_tpl, nickname=nick, wxid=w, group=gname, **tvars)
                 await self._send_to_group(gid, [Plain(text)])
                 logger.info(f"[群管] 入群 -> 群 {gid} / {nick}({w})")
+                self._record_event(gid, gname, "join", nick, w)
+
+            self.snapshots[gid] = curr
+            self.snapshot_source[gid] = source
+            self._pending_diff.pop(gid, None)
+
+    # ===================================================================
+    # WebUI 管理页面（views/dashboard）后端 API
+    # ===================================================================
+    _WEB_API_PREFIX = "/astrbot_plugin_wechat_group_admin"
+    _WEB_SAVE_KEYS = {
+        "at_schedules": list,
+        "chain_starters": list,
+        "monitored_groups": list,
+        "leave_template": str,
+        "join_template": str,
+        "poll_interval_min": int,
+        "notify_group": str,
+    }
+
+    def _record_event(self, gid: str, gname: str, etype: str, nick: str, wxid: str):
+        """记录退群/入群/拦截事件，供管理页「事件记录」展示。"""
+        self._events.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "group": gname or gid,
+            "gid": gid,
+            "type": etype,
+            "nickname": nick,
+            "wxid": wxid,
+        })
+
+    def _register_web_apis(self):
+        """给 views/dashboard 管理页注册后端 API（前端经 bridge apiGet/apiPost 调用）。"""
+        p = self._WEB_API_PREFIX
+        try:
+            self.context.register_web_api(f"{p}/overview", self.web_overview, ["GET"], "群管-面板总览")
+            self.context.register_web_api(f"{p}/events", self.web_events, ["GET"], "群管-事件记录")
+            self.context.register_web_api(f"{p}/save", self.web_save, ["POST"], "群管-保存配置")
+            self.context.register_web_api(f"{p}/rebuild", self.web_rebuild, ["POST"], "群管-重建成员基线")
+        except Exception as e:
+            logger.warning(f"[群管] 注册 Web API 失败（不影响其它功能）：{e}")
+
+    @staticmethod
+    def _ensure_tpl_key(key: str, rule: dict) -> dict:
+        """保证 template_list 规则带 __template_key，否则 WebUI 配置面板不识别。"""
+        if key == "at_schedules":
+            rule.setdefault("__template_key", "at_schedule")
+        elif key == "chain_starters":
+            rule.setdefault("__template_key", "chain_starter")
+        return rule
+
+    async def web_overview(self):
+        """GET 面板总览：状态 + 配置列表 + 监控快照概况。"""
+        monitor = []
+        for g in self._monitored_from_config():
+            snap = self.snapshots.get(g) or {}
+            monitor.append({
+                "gid": g,
+                "name": (self.groups.get(g) or {}).get("name") or "",
+                "baseline": len(snap),
+                "source": self.snapshot_source.get(g, ""),
+            })
+        return json_response({
+            "client_ready": self.client is not None,
+            "poll_interval_min": self._poll_interval(),
+            "notify_group": self.config.get("notify_group") or "",
+            "leave_template": str(self.config.get("leave_template") or ""),
+            "join_template": str(self.config.get("join_template") or ""),
+            "at_schedules": self._rules(),
+            "chain_starters": [dict(x) for x in self._cfg_list("chain_starters")],
+            "monitored": monitor,
+            "group_options": [str(x) for x in (self.config.get("group_options") or [])],
+            "groups": [
+                {"gid": k, "name": (v or {}).get("name") or ""}
+                for k, v in self.groups.items()
+            ],
+            "last_send_error": self._last_send_error,
+            "event_count": len(self._events),
+        })
+
+    async def web_events(self):
+        """GET ?limit=N 最近事件记录（内存环形缓冲，重启清空）。"""
+        try:
+            limit = max(1, min(int(web_request.query.get("limit", 200) or 200), 500))
+        except (TypeError, ValueError):
+            limit = 200
+        items = list(self._events)[-limit:]
+        items.reverse()
+        return json_response({"items": items, "total": len(self._events)})
+
+    async def web_save(self):
+        """POST {key, value} 白名单配置保存；列表保存后立即重建内存镜像。"""
+        body = await web_request.json(default={}) or {}
+        key = str(body.get("key") or "")
+        if key not in self._WEB_SAVE_KEYS:
+            return json_response({"error": f"不支持的配置键：{key}"}, status_code=400)
+        value = body.get("value")
+        want = self._WEB_SAVE_KEYS[key]
+        if want is list:
+            if not isinstance(value, list):
+                return json_response({"error": "value 应为列表"}, status_code=400)
+            if key == "monitored_groups":
+                self.config[key] = [str(v).strip() for v in value if str(v or "").strip()]
+            else:
+                self.config[key] = [
+                    self._ensure_tpl_key(key, dict(x))
+                    for x in value if isinstance(x, dict)
+                ]
+        elif want is int:
+            try:
+                value = max(1, min(int(value), 60))
+            except (TypeError, ValueError):
+                return json_response({"error": "value 应为整数"}, status_code=400)
+            self.config[key] = value
+        else:
+            self.config[key] = str(value or "")
+        ok = await self._save_config()
+        self._load_state_from_config()
+        return json_response({"ok": ok, "key": key})
+
+    async def web_rebuild(self):
+        """POST {group} 清空指定群成员基线，下一轮轮询重建（修复误报后用）。"""
+        body = await web_request.json(default={}) or {}
+        gid = self._normalize_gid(body.get("group") or "")
+        if not gid:
+            return json_response({"error": "缺少 group"}, status_code=400)
+        self.snapshots.pop(gid, None)
+        self.snapshot_source.pop(gid, None)
+        self._pending_diff.pop(gid, None)
+        logger.info(f"[群管] 已清除群 {gid} 的成员基线，下一轮轮询重建。")
+        return json_response({"ok": True, "group": gid})
 
     # ===================================================================
     # 发送

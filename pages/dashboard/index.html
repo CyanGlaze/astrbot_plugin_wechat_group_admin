@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信群管理面板</title>
+<style>
+:root {
+  --bg: #f5f6f8; --card: #ffffff; --text: #1f2329; --muted: #6b7280;
+  --border: #e3e6ea; --accent: #4f7cff; --accent-weak: #e8eeff;
+  --ok: #16a34a; --warn: #d97706; --err: #dc2626; --hover: #f0f2f5;
+}
+[data-theme="dark"] {
+  --bg: #17181c; --card: #22242a; --text: #e6e8ec; --muted: #9aa1ab;
+  --border: #33363d; --accent: #6b93ff; --accent-weak: #2b3550;
+  --ok: #34d399; --warn: #fbbf24; --err: #f87171; --hover: #2a2d34;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 16px; }
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+header h1 { font-size: 18px; margin: 0; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: var(--err); }
+.dot.on { background: var(--ok); }
+.sub { color: var(--muted); font-size: 12px; }
+.spacer { flex: 1; }
+button { background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+  padding: 6px 14px; cursor: pointer; font-size: 13px; }
+button:hover { opacity: .88; }
+button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+button.mini { padding: 2px 8px; font-size: 12px; border-radius: 4px; }
+button.danger { background: var(--err); }
+nav { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+nav button { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+nav button.act { background: var(--accent); color: #fff; border-color: var(--accent); }
+section.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 16px; margin-bottom: 12px; display: none; }
+section.card.act { display: block; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px; margin-bottom: 12px; }
+.stat { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+.stat b { font-size: 20px; display: block; }
+.stat span { color: var(--muted); font-size: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { border-bottom: 1px solid var(--border); padding: 7px 6px; text-align: left; vertical-align: middle; }
+th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+tr:hover td { background: var(--hover); }
+input[type=text], input[type=number], textarea, select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 8px; font-size: 13px; width: 100%;
+  font-family: inherit; }
+textarea { resize: vertical; min-height: 70px; }
+input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
+.wd { display: flex; gap: 6px; flex-wrap: wrap; }
+.wd label { display: flex; align-items: center; gap: 2px; font-size: 12px; white-space: nowrap; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+.tag { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--accent-weak); color: var(--accent); }
+.tag.leave { background: transparent; color: var(--err); border: 1px solid var(--err); }
+.tag.join { background: transparent; color: var(--ok); border: 1px solid var(--ok); }
+.tag.blocked { background: transparent; color: var(--warn); border: 1px solid var(--warn); }
+.err-box { border: 1px solid var(--err); color: var(--err); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; }
+.hint { color: var(--muted); font-size: 12px; }
+#toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: var(--text); color: var(--bg); padding: 8px 18px; border-radius: 8px;
+  opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 9; }
+#toast.show { opacity: .92; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>微信群管理</h1>
+    <span class="dot" id="stDot"></span><span class="sub" id="stTxt">连接中…</span>
+    <span class="spacer"></span>
+    <button class="ghost" id="btnRefresh">刷新</button>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="ov" class="act">概览</button>
+    <button data-tab="at">定时艾特</button>
+    <button data-tab="chain">接龙规则</button>
+    <button data-tab="mon">退群监控</button>
+    <button data-tab="ev">事件记录</button>
+    <button data-tab="set">设置</button>
+  </nav>
+
+  <!-- 概览 -->
+  <section class="card act" id="tab-ov">
+    <div class="cards" id="statCards"></div>
+    <div class="err-box" id="sendErr" style="display:none"></div>
+    <h3>监控中的群</h3>
+    <table id="ovMonTable"><thead><tr>
+      <th>群</th><th>基线人数</th><th>成员接口</th><th>操作</th>
+    </tr></thead><tbody></tbody></table>
+    <p class="hint">基线人数为 0 表示尚未建立成员快照（需客户端在线并完成一轮轮询）。</p>
+  </section>
+
+  <!-- 定时艾特 -->
+  <section class="card" id="tab-at">
+    <div class="row"><b>⏰ 定时艾特规则</b><span class="hint">编辑后点「保存全部」立即生效</span>
+      <span class="spacer"></span>
+      <button class="ghost" id="atAdd">＋ 添加规则</button>
+      <button id="atSave">保存全部</button></div>
+    <table id="atTable"><thead><tr>
+      <th>启用</th><th>群</th><th>重复</th><th>星期(每周)</th><th>时间</th>
+      <th>对象</th><th>成员</th><th>内容</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <p class="hint">once = 只执行一次，触发后自动停用；weekly 时按勾选的星期触发；多个时间用英文逗号（09:30,18:00）。</p>
+  </section>
+
+  <!-- 接龙规则 -->
+  <section class="card" id="tab-chain">
+    <div class="row"><b>📋 自动发起接龙</b><span class="hint">只发引子，成员点「参与接龙」</span>
+      <span class="spacer"></span>
+      <button class="ghost" id="chAdd">＋ 添加规则</button>
+      <button id="chSave">保存全部</button></div>
+    <table id="chTable"><thead><tr>
+      <th>启用</th><th>群</th><th>主题(0.行)</th><th>第一个人(1.行)</th>
+      <th>时间</th><th>重复</th><th>星期(每周)</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <p class="hint">标题固定白名单词「接龙功能测试：」，自定义主题放「主题」列（发为 0. 行）；时间留空 = 只手动 /发起接龙。</p>
+  </section>
+
+  <!-- 退群监控 -->
+  <section class="card" id="tab-mon">
+    <div class="row"><b>👥 监控群</b>
+      <span class="spacer"></span><button id="monSave">保存</button></div>
+    <div id="monList"></div>
+    <div class="row">
+      <input type="text" id="monNew" placeholder="群 ID（xxx@chatroom），可从下拉选" list="gidList" style="max-width:340px">
+      <button class="ghost" id="monAdd">＋ 添加</button>
+    </div>
+    <datalist id="gidList"></datalist>
+    <h3>播报模板</h3>
+    <div class="row"><div style="flex:1"><label>退群模板<br>
+      <textarea id="tplLeave"></textarea></label></div></div>
+    <div class="row"><div style="flex:1"><label>入群模板<br>
+      <textarea id="tplJoin"></textarea></label></div></div>
+    <p class="hint">变量：{nickname} {wxid} {group} {date} {time} {weekday}</p>
+    <div class="row"><button id="tplSave">保存模板</button></div>
+  </section>
+
+  <!-- 事件记录 -->
+  <section class="card" id="tab-ev">
+    <div class="row"><b>📇 事件记录</b><span class="hint">内存保存最近 500 条，重启清空</span>
+      <span class="spacer"></span>
+      <select id="evFilter" style="max-width:140px">
+        <option value="">全部</option><option value="leave">退群</option>
+        <option value="join">入群</option><option value="blocked">拦截</option>
+      </select>
+      <button class="ghost" id="evRefresh">刷新</button></div>
+    <table id="evTable"><thead><tr>
+      <th>时间</th><th>群</th><th>类型</th><th>成员</th><th>微信号</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <!-- 设置 -->
+  <section class="card" id="tab-set">
+    <h3>常规设置</h3>
+    <div class="row"><label style="width:220px">轮询间隔（分钟，1~60）
+      <input type="number" id="setPoll" min="1" max="60"></label>
+      <label style="flex:1">通知群（播报复制发到这里，可空）
+      <input type="text" id="setNotify" list="gidList"></label></div>
+    <div class="row"><button id="setSave">保存</button></div>
+    <h3>误报处理</h3>
+    <p class="hint">插件已内置三层防误报：名单远小于基线时整轮跳过；差比需连续两轮一致才播报；单轮 ≥30% 变动拦截。
+    若仍出现误报，可在「概览」对该群点「重建基线」，下一轮轮询会重新建立成员快照。</p>
+  </section>
+</div>
+<div id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+  var b = null;              // bridge
+  var OV = null;             // overview 数据
+  var atRules = [];          // at_schedules 编辑副本
+  var chRules = [];          // chain_starters 编辑副本
+  var $ = function (s) { return document.querySelector(s); };
+  var $$ = function (s) { return Array.prototype.slice.call(document.querySelectorAll(s)); };
+
+  function toast(msg) {
+    var t = $("#toast"); t.textContent = msg; t.classList.add("show");
+    clearTimeout(t._h); t._h = setTimeout(function () { t.classList.remove("show"); }, 2200);
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function normGid(v) {
+    var s = String(v || "").trim();
+    if (s.indexOf(":") >= 0) s = s.split(":").pop().trim();
+    if (s && s.indexOf("@") < 0) s += "@chatroom";
+    return s;
+  }
+  function gidLabel(gid) {
+    if (!OV) return gid;
+    for (var i = 0; i < (OV.groups || []).length; i++)
+      if (OV.groups[i].gid === gid && OV.groups[i].name) return OV.groups[i].name + "（" + gid + "）";
+    return gid;
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  async function getBridge() {
+    for (var i = 0; i < 60; i++) {
+      if (window.AstrBotPluginPage) return window.AstrBotPluginPage;
+      await sleep(100);
+    }
+    throw new Error("面板 bridge 未就绪，请刷新页面重试");
+  }
+  async function apiGet(ep, params) { return b.apiGet(ep, params); }
+  async function apiPost(ep, body) { return b.apiPost(ep, body); }
+
+  // ---------- 概览 ----------
+  function renderOverview() {
+    $("#stDot").className = "dot" + (OV.client_ready ? " on" : "");
+    $("#stTxt").textContent = OV.client_ready
+      ? "客户端已连接 · 轮询 " + OV.poll_interval_min + " 分钟"
+      : "未捕获客户端（请在群里发一条消息）";
+    $("#statCards").innerHTML = [
+      ["定时规则", (OV.at_schedules || []).length],
+      ["接龙规则", (OV.chain_starters || []).length],
+      ["监控群", (OV.monitored || []).length],
+      ["事件数", OV.event_count || 0],
+    ].map(function (x) {
+      return '<div class="stat"><b>' + x[1] + "</b><span>" + x[0] + "</span></div>";
+    }).join("");
+    var errBox = $("#sendErr");
+    if (OV.last_send_error) {
+      errBox.style.display = "block";
+      errBox.textContent = "最近发送错误：" + OV.last_send_error;
+    } else { errBox.style.display = "none"; }
+    var tb = $("#ovMonTable tbody");
+    tb.innerHTML = (OV.monitored || []).map(function (m, i) {
+      return "<tr><td>" + esc(gidLabel(m.gid)) + "</td><td>" + m.baseline +
+        "</td><td>" + esc(m.source || "—") + '</td><td><button class="mini ghost" data-rb="' +
+        esc(m.gid) + '">重建基线</button></td></tr>';
+    }).join("") || '<tr><td colspan="4" class="hint">暂无监控群，去「退群监控」添加。</td></tr>';
+    $$("#ovMonTable [data-rb]").forEach(function (btn) {
+      btn.onclick = async function () {
+        if (!confirm("确定重建该群的成员基线？下一轮轮询生效。")) return;
+        await apiPost("rebuild", { group: btn.getAttribute("data-rb") });
+        toast("已请求重建基线"); loadOverview();
+      };
+    });
+  }
+
+  // ---------- 定时艾特 ----------
+  var WD = ["wd_mon", "wd_tue", "wd_wed", "wd_thu", "wd_fri", "wd_sat", "wd_sun"];
+  var WD_NAME = ["一", "二", "三", "四", "五", "六", "日"];
+  function renderAt() {
+    var tb = $("#atTable tbody");
+    tb.innerHTML = atRules.map(function (r, i) {
+      var wd = '<div class="wd">' + WD.map(function (k, j) {
+        return '<label><input type="checkbox" data-i="' + i + '" data-wd="' + k + '"' +
+          (r[k] ? " checked" : "") + ">" + WD_NAME[j] + "</label>";
+      }).join("") + "</div>";
+      return "<tr>" +
+        '<td><input type="checkbox" data-i="' + i + '" data-f="enabled"' + (r.enabled !== false ? " checked" : "") + "></td>" +
+        '<td><input type="text" data-i="' + i + '" data-f="group_id" list="gidList" value="' + esc(r.group_id) + '" style="min-width:150px"></td>' +
+        '<td><select data-i="' + i + '" data-f="repeat">' +
+          ["daily", "weekly", "once"].map(function (v) {
+            return "<option value=" + v + (r.repeat === v ? " selected" : "") + ">" +
+              ({ daily: "每天", weekly: "每周", once: "一次" }[v]) + "</option>";
+          }).join("") + "</select></td>" +
+        "<td>" + wd + "</td>" +
+        '<td><input type="text" data-i="' + i + '" data-f="time" value="' + esc(r.time) + '" style="width:90px"></td>' +
+        '<td><select data-i="' + i + '" data-f="target">' +
+          '<option value="all"' + (r.target !== "members" ? " selected" : "") + ">@全体</option>" +
+          '<option value="members"' + (r.target === "members" ? " selected" : "") + ">@成员</option>" +
+          "</select></td>" +
+        '<td><input type="text" data-i="' + i + '" data-f="members" value="' + esc(r.members) + '" style="min-width:110px"></td>' +
+        '<td><textarea data-i="' + i + '" data-f="content" style="min-width:150px">' + esc(r.content) + "</textarea></td>" +
+        '<td><button class="mini danger" data-del="' + i + '">删</button></td></tr>";
+    }).join("") || '<tr><td colspan="9" class="hint">暂无规则，点「添加规则」。</td></tr>';
+    bindAtTable();
+  }
+  function bindAtTable() {
+    $$('#atTable [data-f]').forEach(function (el) {
+      var i = +el.getAttribute("data-i"), f = el.getAttribute("data-f");
+      var evName = (el.tagName === "SELECT" || el.type === "checkbox") ? "change" : "input";
+      el.addEventListener(evName, function () {
+        atRules[i][f] = el.type === "checkbox" ? el.checked : el.value;
+      });
+    });
+    $$('#atTable [data-wd]').forEach(function (el) {
+      el.addEventListener("change", function () {
+        atRules[+el.getAttribute("data-i")][el.getAttribute("data-wd")] = el.checked;
+      });
+    });
+    $$('#atTable [data-del]').forEach(function (btn) {
+      btn.onclick = function () {
+        if (!confirm("删除这条规则？")) return;
+        atRules.splice(+btn.getAttribute("data-del"), 1); renderAt();
+      };
+    });
+  }
+  $("#atAdd").onclick = function () {
+    atRules.push({ __template_key: "at_schedule", enabled: true, group_id: "",
+      repeat: "daily", time: "09:30", target: "all", members: "", content: "", note: "" });
+    renderAt();
+  };
+  $("#atSave").onclick = async function () {
+    var r = await apiPost("save", { key: "at_schedules", value: atRules });
+    toast(r && r.ok !== false ? "已保存并生效" : "保存失败");
+    loadOverview();
+  };
+
+  // ---------- 接龙规则 ----------
+  function renderCh() {
+    var tb = $("#chTable tbody");
+    tb.innerHTML = chRules.map(function (r, i) {
+      var wd = '<div class="wd">' + WD.map(function (k, j) {
+        return '<label><input type="checkbox" data-i="' + i + '" data-wd="' + k + '"' +
+          (r[k] ? " checked" : "") + ">" + WD_NAME[j] + "</label>";
+      }).join("") + "</div>";
+      return "<tr>" +
+        '<td><input type="checkbox" data-i="' + i + '" data-f="enabled"' + (r.enabled !== false ? " checked" : "") + "></td>" +
+        '<td><input type="text" data-i="' + i + '" data-f="group_id" list="gidList" value="' + esc(r.group_id) + '" style="min-width:140px"></td>' +
+        '<td><input type="text" data-i="' + i + '" data-f="topic" value="' + esc(r.topic) + '" style="min-width:110px"></td>' +
+        '<td><input type="text" data-i="' + i + '" data-f="first_item" value="' + esc(r.first_item) + '" style="min-width:110px"></td>' +
+        '<td><input type="text" data-i="' + i + '" data-f="time" value="' + esc(r.time) + '" style="width:90px"></td>' +
+        '<td><select data-i="' + i + '" data-f="repeat">' +
+          ["daily", "weekly", "once"].map(function (v) {
+            return "<option value=" + v + (r.repeat === v ? " selected" : "") + ">" +
+              ({ daily: "每天", weekly: "每周", once: "一次" }[v]) + "</option>";
+          }).join("") + "</select></td>" +
+        "<td>" + wd + "</td>" +
+        '<td><button class="mini danger" data-del="' + i + '">删</button></td></tr>";
+    }).join("") || '<tr><td colspan="8" class="hint">暂无规则，点「添加规则」。</td></tr>';
+    bindChTable();
+  }
+  function bindChTable() {
+    $$('#chTable [data-f]').forEach(function (el) {
+      var i = +el.getAttribute("data-i"), f = el.getAttribute("data-f");
+      var evName = (el.tagName === "SELECT" || el.type === "checkbox") ? "change" : "input";
+      el.addEventListener(evName, function () {
+        chRules[i][f] = el.type === "checkbox" ? el.checked : el.value;
+      });
+    });
+    $$('#chTable [data-wd]').forEach(function (el) {
+      el.addEventListener("change", function () {
+        chRules[+el.getAttribute("data-i")][el.getAttribute("data-wd")] = el.checked;
+      });
+    });
+    $$('#chTable [data-del]').forEach(function (btn) {
+      btn.onclick = function () {
+        if (!confirm("删除这条接龙规则？")) return;
+        chRules.splice(+btn.getAttribute("data-del"), 1); renderCh();
+      };
+    });
+  }
+  $("#chAdd").onclick = function () {
+    chRules.push({ __template_key: "chain_starter", enabled: true, group_id: "",
+      topic: "", first_item: "", time: "", repeat: "daily", note: "" });
+    renderCh();
+  };
+  $("#chSave").onclick = async function () {
+    var r = await apiPost("save", { key: "chain_starters", value: chRules });
+    toast(r && r.ok !== false ? "已保存并生效" : "保存失败");
+    loadOverview();
+  };
+
+  // ---------- 退群监控 ----------
+  function renderMon() {
+    var box = $("#monList");
+    box.innerHTML = (OV.monitored || []).map(function (m, i) {
+      return '<div class="row"><span class="tag">' + esc(gidLabel(m.gid)) +
+        '</span><span class="hint">基线 ' + m.baseline + " 人</span>" +
+        '<button class="mini ghost" data-mon-del="' + i + '">移除</button></div>';
+    }).join("") || '<p class="hint">暂无监控群。</p>';
+    $$("#monList [data-mon-del]").forEach(function (btn) {
+      btn.onclick = function () {
+        var gids = (OV.monitored || []).map(function (m) { return m.gid; });
+        gids.splice(+btn.getAttribute("data-mon-del"), 1);
+        apiPost("save", { key: "monitored_groups", value: gids }).then(function () {
+          toast("已移除"); loadOverview();
+        });
+      };
+    });
+    $("#tplLeave").value = OV.leave_template || "";
+    $("#tplJoin").value = OV.join_template || "";
+    $("#monNew").value = "";
+    var dl = $("#gidList");
+    var seen = {};
+    dl.innerHTML = [].concat(OV.groups || [], (OV.group_options || []).map(function (u) {
+      return { gid: normGid(u), name: "" };
+    })).filter(function (g) {
+      if (!g.gid || seen[g.gid]) return false; seen[g.gid] = 1; return true;
+    }).map(function (g) {
+      return '<option value="' + esc(g.gid) + '">' + esc(g.name || "") + "</option>";
+    }).join("");
+  }
+  $("#monAdd").onclick = async function () {
+    var g = normGid($("#monNew").value);
+    if (!g) { toast("请填群 ID"); return; }
+    var gids = (OV.monitored || []).map(function (m) { return m.gid; });
+    if (gids.indexOf(g) >= 0) { toast("已在监控列表"); return; }
+    gids.push(g);
+    var r = await apiPost("save", { key: "monitored_groups", value: gids });
+    toast(r && r.ok !== false ? "已添加" : "保存失败");
+    loadOverview();
+  };
+  $("#monSave").onclick = async function () {
+    toast("监控群列表无需手动保存（增删即保存）");
+  };
+  $("#tplSave").onclick = async function () {
+    await apiPost("save", { key: "leave_template", value: $("#tplLeave").value });
+    await apiPost("save", { key: "join_template", value: $("#tplJoin").value });
+    toast("模板已保存");
+  };
+
+  // ---------- 事件记录 ----------
+  var evAll = [];
+  function renderEv() {
+    var f = $("#evFilter").value;
+    var rows = evAll.filter(function (e) { return !f || e.type === f; });
+    $("#evTable tbody").innerHTML = rows.map(function (e) {
+      var name = { leave: "退群", join: "入群", blocked: "拦截" }[e.type] || e.type;
+      return "<tr><td>" + esc(e.time) + "</td><td>" + esc(e.group) +
+        '</td><td><span class="tag ' + esc(e.type) + '">' + name + "</span></td><td>" +
+        esc(e.nickname) + "</td><td>" + esc(e.wxid) + "</td></tr>";
+    }).join("") || '<tr><td colspan="5" class="hint">暂无记录。</td></tr>';
+  }
+  async function loadEvents() {
+    var r = await apiGet("events", { limit: 200 });
+    evAll = (r && r.items) || [];
+    renderEv();
+  }
+  $("#evRefresh").onclick = loadEvents;
+  $("#evFilter").onchange = renderEv;
+
+  // ---------- 设置 ----------
+  function renderSet() {
+    $("#setPoll").value = OV.poll_interval_min || 5;
+    $("#setNotify").value = OV.notify_group || "";
+  }
+  $("#setSave").onclick = async function () {
+    await apiPost("save", { key: "poll_interval_min", value: +$("#setPoll").value });
+    await apiPost("save", { key: "notify_group", value: $("#setNotify").value });
+    toast("已保存"); loadOverview();
+  };
+
+  // ---------- 数据加载 / 页签 ----------
+  async function loadOverview() {
+    OV = await apiGet("overview");
+    atRules = OV.at_schedules || [];
+    chRules = OV.chain_starters || [];
+    renderOverview(); renderAt(); renderCh(); renderMon(); renderSet();
+  }
+  $$("#tabs button").forEach(function (btn) {
+    btn.onclick = function () {
+      $$("#tabs button").forEach(function (x) { x.classList.remove("act"); });
+      btn.classList.add("act");
+      $$("section.card").forEach(function (s) { s.classList.remove("act"); });
+      $("#tab-" + btn.getAttribute("data-tab")).classList.add("act");
+      if (btn.getAttribute("data-tab") === "ev") loadEvents();
+    };
+  });
+  $("#btnRefresh").onclick = async function () {
+    try { await loadOverview(); toast("已刷新"); }
+    catch (e) { toast("刷新失败：" + e.message); }
+  };
+
+  (async function init() {
+    try {
+      b = await getBridge();
+      await loadOverview();
+    } catch (e) {
+      $("#stTxt").textContent = "加载失败：" + e.message;
+    }
+  })();
+})();
+</script>
+</body>
+</html>
