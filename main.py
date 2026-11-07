@@ -142,7 +142,7 @@ def _parse_dow(expr: Optional[str]) -> Set[int]:
     "astrbot_plugin_wechat_group_admin",
     "青璃",
     "微信群管理：面板化定时@/发起官方接龙、命令双向同步、群设置变更（wechat_agent 适配器）",
-    "1.7.0",
+    "1.7.1",
     "https://github.com/AstrBotDevs/AstrBot",
 )
 class WechatGroupAdmin(Star):
@@ -153,6 +153,7 @@ class WechatGroupAdmin(Star):
         self.client = None        # WeChatClient 实例
         self.groups: Dict[str, Dict[str, Any]] = {}      # gid -> {umo, thread_id, name}
         self.snapshots: Dict[str, Dict[str, str]] = {}   # gid -> {member_id: 群昵称}
+        self.snapshots_wx: Dict[str, Dict[str, str]] = {}  # gid -> {member_id: 微信昵称}
         self.snapshot_source: Dict[str, str] = {}        # gid -> 上次用的成员接口名
         self._pending_diff: Dict[str, Dict[str, Any]] = {}  # gid -> 待确认差比（防误报）
         self.monitored: List[str] = []
@@ -172,6 +173,18 @@ class WechatGroupAdmin(Star):
     # 生命周期 / 调度
     # ===================================================================
     # ---------- 配置面板 = 唯一数据源 ----------
+    @property
+    def _opts(self) -> dict:
+        """全部插件数据存于 config['options']（schema 声明为 type=dict，重载不清理）。
+
+        WebUI 自带配置页因此只需一个入口，所有参数在插件管理面板里维护。
+        """
+        o = self._opts.get("options")
+        if not isinstance(o, dict):
+            o = {}
+            self._opts["options"] = o
+        return o
+
     @staticmethod
     def _normalize_gid(value) -> str:
         """把 UMO / 纯群号 / 群 ID 统一成 xxx@chatroom。"""
@@ -198,25 +211,25 @@ class WechatGroupAdmin(Star):
             return False
 
     def _rules(self) -> List[dict]:
-        v = self.config.get("at_schedules") or []
+        v = self._opts.get("at_schedules") or []
         return [dict(x) for x in v if isinstance(x, dict)] if isinstance(v, list) else []
 
     async def _register_group_option(self, umo: str) -> None:
         """把新发现的群会话写进面板「已发现的群」，供可视化选择。只在出现新群时落盘。"""
         if not umo or ":GroupMessage:" not in str(umo):
             return
-        opts = self.config.get("group_options") or []
+        opts = self._opts.get("group_options") or []
         if not isinstance(opts, list):
             opts = []
         if umo in opts:
             return
         opts.append(str(umo))
-        self.config["group_options"] = opts[-100:]
+        self._opts["group_options"] = opts[-100:]
         await self._save_config()
         logger.info(f"[群管] 已把新群加入面板群选项：{umo}")
 
     def _monitored_from_config(self) -> List[str]:
-        v = self.config.get("monitored_groups") or []
+        v = self._opts.get("monitored_groups") or []
         out: List[str] = []
         for x in v if isinstance(v, list) else []:
             g = self._normalize_gid(x)
@@ -250,7 +263,7 @@ class WechatGroupAdmin(Star):
         """刷新内存镜像。所有命令与调度都以此为唯一依据。"""
         self.schedules = self._config_at_tasks()
         self.monitored = self._monitored_from_config()
-        self.notify_group = self._normalize_gid(self.config.get("notify_group") or "")
+        self.notify_group = self._normalize_gid(self._opts.get("notify_group") or "")
 
     async def _migrate_kv_to_config(self):
         """旧版 KV 里的任务/监控群一次性搬进面板，之后不再用 KV 存这些。"""
@@ -281,10 +294,10 @@ class WechatGroupAdmin(Star):
             g = self._normalize_gid(g)
             if g and g not in mons:
                 mons.append(g)
-        self.config["at_schedules"] = rules
-        self.config["monitored_groups"] = mons
-        if old_notify and not self.config.get("notify_group"):
-            self.config["notify_group"] = self._normalize_gid(old_notify)
+        self._opts["at_schedules"] = rules
+        self._opts["monitored_groups"] = mons
+        if old_notify and not self._opts.get("notify_group"):
+            self._opts["notify_group"] = self._normalize_gid(old_notify)
         await self._save_config()
         try:
             await self.put_kv_data(KV_SCHEDULES, [])
@@ -357,7 +370,7 @@ class WechatGroupAdmin(Star):
 
     def _poll_interval(self) -> int:
         try:
-            return max(1, min(int(self.config.get("poll_interval_min", 5) or 5), 60))
+            return max(1, min(int(self._opts.get("poll_interval_min", 5) or 5), 60))
         except (TypeError, ValueError):
             return 5
 
@@ -371,6 +384,8 @@ class WechatGroupAdmin(Star):
             await asyncio.sleep(20)
 
     async def _tick(self):
+        if self._opts.get("enable") is False:
+            return  # 插件总开关关闭：所有后台动作停止
         if self.client is None:
             # 守护进程晚于插件就绪时自动重试捕获（每轮 20s 一次，开销可忽略）
             self._try_capture_client()
@@ -473,7 +488,7 @@ class WechatGroupAdmin(Star):
     # ===================================================================
     def _cfg_list(self, key: str) -> List[dict]:
         """读配置面板的 template_list；每次现读，保存后无需重启即可生效。"""
-        v = self.config.get(key) or []
+        v = self._opts.get(key) or []
         return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
 
     _WD_KEYS = ("wd_mon", "wd_tue", "wd_wed", "wd_thu", "wd_fri", "wd_sat", "wd_sun")
@@ -554,11 +569,11 @@ class WechatGroupAdmin(Star):
         """一次性定时@触发后，把来源面板规则置为停用并持久化，避免重复触发。"""
         try:
             i = int(str(task.get("id", "")).split("_")[0])
-            rules = self.config.get("at_schedules") or []
+            rules = self._opts.get("at_schedules") or []
             if not (0 <= i < len(rules)):
                 return
             rules[i]["enabled"] = False
-            self.config["at_schedules"] = rules
+            self._opts["at_schedules"] = rules
             self._load_state_from_config()   # 重建内存镜像（自动排除已停用规则）
             await self._save_config()
             logger.info(f"[群管] 一次性定时任务 #{i + 1} 已触发并自动停用")
@@ -569,11 +584,11 @@ class WechatGroupAdmin(Star):
         """一次性接龙引子触发后，停用来源面板规则并持久化。"""
         try:
             i = int(str(rule.get("id", "")).split("_")[0])
-            rules = self.config.get("chain_starters") or []
+            rules = self._opts.get("chain_starters") or []
             if not (0 <= i < len(rules)):
                 return
             rules[i]["enabled"] = False
-            self.config["chain_starters"] = rules
+            self._opts["chain_starters"] = rules
             await self._save_config()
             logger.info(f"[群管] 一次性接龙任务 #{i + 1} 已触发并自动停用")
         except Exception as e:
@@ -662,7 +677,7 @@ class WechatGroupAdmin(Star):
         if self.client is None or not members:
             return members
         thread_id = (self.groups.get(gid) or {}).get("thread_id") or _normalize_chatroom(gid)
-        curr, _ = await self._fetch_members(thread_id)
+        curr, _, _ = await self._fetch_members(thread_id)
         if not curr:
             return members
         out: List[str] = []
@@ -678,7 +693,7 @@ class WechatGroupAdmin(Star):
     # 退群 / 入群监控（轮询差比）
     # ===================================================================
     async def _fetch_members(self, thread_id: str):
-        """返回 (成员字典, 使用的接口名)。group_lookup 更可靠，优先用。"""
+        """返回 (成员字典, 微信昵称字典, 使用的接口名)。group_lookup 更可靠，优先用。"""
         fetchers = []
         if self.client is not None:
             for name in ("group_lookup", "group_members"):
@@ -692,6 +707,7 @@ class WechatGroupAdmin(Star):
                 logger.debug(f"[群管] {name} 拉取失败({thread_id})：{e}")
                 continue
             members: Dict[str, str] = {}
+            wxnames: Dict[str, str] = {}
             for m in items or []:
                 if not isinstance(m, dict):
                     continue
@@ -701,9 +717,10 @@ class WechatGroupAdmin(Star):
                 nm = (m.get("roomDisplayName") or m.get("displayName")
                       or m.get("mentionName") or m.get("nickname") or mid)
                 members[str(mid)] = str(nm)
+                wxnames[str(mid)] = str(m.get("nickname") or m.get("displayName") or nm)
             if members:
-                return members, name
-        return {}, ""
+                return members, wxnames, name
+        return {}, {}, ""
 
     async def _poll_once(self):
         if self.client is None:
@@ -713,18 +730,19 @@ class WechatGroupAdmin(Star):
             return
         self._warned_no_client = False
 
-        leave_tpl = str(self.config.get("leave_template") or DEFAULT_LEAVE_TEMPLATE)
-        join_tpl = str(self.config.get("join_template") or DEFAULT_JOIN_TEMPLATE)
+        leave_tpl = str(self._opts.get("leave_template") or DEFAULT_LEAVE_TEMPLATE)
+        join_tpl = str(self._opts.get("join_template") or DEFAULT_JOIN_TEMPLATE)
 
         for gid in list(self.monitored):
             info = self.groups.get(gid) or {}
             thread_id = info.get("thread_id") or _normalize_chatroom(gid)
-            curr, source = await self._fetch_members(thread_id)
+            curr, wxnames, source = await self._fetch_members(thread_id)
             if not curr:
                 logger.warning(f"[群管] 群 {gid} 成员列表为空，本轮跳过（避免误报全员退群）。")
                 continue
 
             prev = self.snapshots.get(gid)
+            prev_wx = self.snapshots_wx.get(gid) or {}
             prev_source = self.snapshot_source.get(gid)
             rebuild = prev is None
             if not rebuild and len(curr) < len(prev) * 0.7:
@@ -748,6 +766,7 @@ class WechatGroupAdmin(Star):
                     )
             if rebuild:
                 self.snapshots[gid] = curr
+                self.snapshots_wx[gid] = wxnames
                 self.snapshot_source[gid] = source
                 self._pending_diff.pop(gid, None)
                 logger.info(f"[群管] 群 {gid} 建立成员基线：{len(curr)} 人（来源 {source}）")
@@ -759,6 +778,7 @@ class WechatGroupAdmin(Star):
             if not left and not joined:
                 self._pending_diff.pop(gid, None)
                 self.snapshots[gid] = curr
+                self.snapshots_wx[gid] = wxnames
                 self.snapshot_source[gid] = source
                 continue
 
@@ -803,18 +823,21 @@ class WechatGroupAdmin(Star):
             tvars = _time_vars()
             for w in sorted(confirm_left):
                 nick = prev.get(w, w)
-                text = self._fmt(leave_tpl, nickname=nick, wxid=w, group=gname, **tvars)
+                text = self._fmt(leave_tpl, nickname=nick, wxid=w, group=gname,
+                                 wxname=prev_wx.get(w, ""), **tvars)
                 await self._send_to_group(gid, [Plain(text)])
                 logger.info(f"[群管] 退群 -> 群 {gid} / {nick}({w})")
                 self._record_event(gid, gname, "leave", nick, w)
             for w in sorted(confirm_joined):
                 nick = curr.get(w, w)
-                text = self._fmt(join_tpl, nickname=nick, wxid=w, group=gname, **tvars)
+                text = self._fmt(join_tpl, nickname=nick, wxid=w, group=gname,
+                                 wxname=wxnames.get(w, ""), **tvars)
                 await self._send_to_group(gid, [Plain(text)])
                 logger.info(f"[群管] 入群 -> 群 {gid} / {nick}({w})")
                 self._record_event(gid, gname, "join", nick, w)
 
             self.snapshots[gid] = curr
+            self.snapshots_wx[gid] = wxnames
             self.snapshot_source[gid] = source
             self._pending_diff.pop(gid, None)
 
@@ -882,17 +905,17 @@ class WechatGroupAdmin(Star):
         return json_response({
             "client_ready": self.client is not None,
             "poll_interval_min": self._poll_interval(),
-            "notify_group": self.config.get("notify_group") or "",
-            "leave_template": str(self.config.get("leave_template") or ""),
-            "join_template": str(self.config.get("join_template") or ""),
-            "enable": self.config.get("enable", True) is not False,
-            "require_confirm": self.config.get("require_confirm", True) is not False,
-            "confirm_ttl_sec": self.config.get("confirm_ttl_sec", 60),
-            "mutation_wait_sec": self.config.get("mutation_wait_sec", 30),
+            "notify_group": self._opts.get("notify_group") or "",
+            "leave_template": str(self._opts.get("leave_template") or ""),
+            "join_template": str(self._opts.get("join_template") or ""),
+            "enable": self._opts.get("enable", True) is not False,
+            "require_confirm": self._opts.get("require_confirm", True) is not False,
+            "confirm_ttl_sec": self._opts.get("confirm_ttl_sec", 60),
+            "mutation_wait_sec": self._opts.get("mutation_wait_sec", 30),
             "at_schedules": self._rules(),
             "chain_starters": [dict(x) for x in self._cfg_list("chain_starters")],
             "monitored": monitor,
-            "group_options": [str(x) for x in (self.config.get("group_options") or [])],
+            "group_options": [str(x) for x in (self._opts.get("group_options") or [])],
             "groups": [
                 {"gid": k, "name": (v or {}).get("name") or ""}
                 for k, v in self.groups.items()
@@ -924,9 +947,9 @@ class WechatGroupAdmin(Star):
             if not isinstance(value, list):
                 return json_response({"error": "value 应为列表"}, status_code=400)
             if key == "monitored_groups":
-                self.config[key] = [str(v).strip() for v in value if str(v or "").strip()]
+                self._opts[key] = [str(v).strip() for v in value if str(v or "").strip()]
             else:
-                self.config[key] = [
+                self._opts[key] = [
                     self._ensure_tpl_key(key, dict(x))
                     for x in value if isinstance(x, dict)
                 ]
@@ -935,11 +958,11 @@ class WechatGroupAdmin(Star):
                 value = int(value)
             except (TypeError, ValueError):
                 return json_response({"error": "value 应为整数"}, status_code=400)
-            self.config[key] = max(spec.get("min", 1), min(value, spec.get("max", 60)))
+            self._opts[key] = max(spec.get("min", 1), min(value, spec.get("max", 60)))
         elif t == "bool":
-            self.config[key] = bool(value)
+            self._opts[key] = bool(value)
         else:
-            self.config[key] = str(value or "")
+            self._opts[key] = str(value or "")
         ok = await self._save_config()
         self._load_state_from_config()
         return json_response({"ok": ok, "key": key})
@@ -951,6 +974,7 @@ class WechatGroupAdmin(Star):
         if not gid:
             return json_response({"error": "缺少 group"}, status_code=400)
         self.snapshots.pop(gid, None)
+        self.snapshots_wx.pop(gid, None)
         self.snapshot_source.pop(gid, None)
         self._pending_diff.pop(gid, None)
         logger.info(f"[群管] 已清除群 {gid} 的成员基线，下一轮轮询重建。")
@@ -1015,8 +1039,8 @@ class WechatGroupAdmin(Star):
     async def menu(self, event: AstrMessageEvent):
         """查看微信群管理插件所有指令"""
         yield event.plain_result(
-            "🛠 微信群管理 v1.6.0（仅管理员）\n"
-            "【WebUI 配置面板 = 唯一数据源】\n"
+            "🛠 微信群管理 v1.7.1（仅管理员）\n"
+            "【插件管理面板 = 唯一数据源】\n"
             "· ⏰ 定时艾特规则 / 📋 自动发起接龙 / 👥 监控群 / 📇 已发现的群\n"
             "  命令添加的任务会自动回写到面板，可在面板里改/删\n"
             "· 所有 [群id] 可省略：不带=当前群，带=指定群\n"
@@ -1159,7 +1183,7 @@ class WechatGroupAdmin(Star):
         mons = self._monitored_from_config()
         if gid not in mons:
             mons.append(gid)
-            self.config["monitored_groups"] = mons
+            self._opts["monitored_groups"] = mons
             ok = await self._save_config()
             self._load_state_from_config()
             if not ok:
@@ -1181,7 +1205,7 @@ class WechatGroupAdmin(Star):
         mons = self._monitored_from_config()
         if gid in mons:
             mons.remove(gid)
-            self.config["monitored_groups"] = mons
+            self._opts["monitored_groups"] = mons
             await self._save_config()
             self.snapshots.pop(gid, None)
             self.snapshot_source.pop(gid, None)
@@ -1247,7 +1271,7 @@ class WechatGroupAdmin(Star):
                 "members": list(members), "content": content,
             }))
             made.append(f"{dow + ' ' if dow else ''}{hour:02d}:{minute:02d}")
-        self.config["at_schedules"] = rules
+        self._opts["at_schedules"] = rules
         ok = await self._save_config()
         self._load_state_from_config()
         self._ensure_group(gid)
@@ -1270,7 +1294,7 @@ class WechatGroupAdmin(Star):
             yield event.plain_result("序号不存在。")
             return
         removed = rules.pop(idx)
-        self.config["at_schedules"] = rules
+        self._opts["at_schedules"] = rules
         await self._save_config()
         self._load_state_from_config()
         who = "@全体" if removed.get("target") != "members" else "@成员"
@@ -1352,9 +1376,9 @@ class WechatGroupAdmin(Star):
         gid, toks = self._split_gid(event, self._strip_command(event, "设置通知群"))
         if toks and toks[0].lower() in ("off", "关闭", "clear", "none", "0"):
             gid = None
-        self.config["notify_group"] = self._normalize_gid(gid) or ""
+        self._opts["notify_group"] = self._normalize_gid(gid) or ""
         await self._save_config()
-        self.notify_group = self.config["notify_group"]
+        self.notify_group = self._opts["notify_group"]
         yield event.plain_result(
             f"✅ 变动通知额外发送到：{self.notify_group}"
             if self.notify_group else "🗑 已关闭额外通知群。"
@@ -1782,18 +1806,18 @@ class WechatGroupAdmin(Star):
         return head + ("\n" + hint if hint else "") + f"\n原始信息：{str(e)[:160]}"
 
     def _need_confirm(self) -> bool:
-        v = self.config.get("require_confirm", True)
+        v = self._opts.get("require_confirm", True)
         return v is not False and str(v).lower() not in ("false", "0", "no", "off")
 
     def _confirm_ttl(self) -> int:
         try:
-            return max(10, min(int(self.config.get("confirm_ttl_sec", 60) or 60), 600))
+            return max(10, min(int(self._opts.get("confirm_ttl_sec", 60) or 60), 600))
         except (TypeError, ValueError):
             return 60
 
     def _mutation_wait(self) -> float:
         try:
-            return float(max(3, min(int(self.config.get("mutation_wait_sec", 30) or 30), 120)))
+            return float(max(3, min(int(self._opts.get("mutation_wait_sec", 30) or 30), 120)))
         except (TypeError, ValueError):
             return 30.0
 

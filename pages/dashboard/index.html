@@ -46,6 +46,9 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { border-bottom: 1px solid var(--border); padding: 7px 6px; text-align: left; vertical-align: middle; }
 th { color: var(--muted); font-weight: 500; white-space: nowrap; }
 tr:hover td { background: var(--hover); }
+.tbl-wrap { overflow-x: auto; }
+#atTable, #chTable { min-width: 920px; }
+#ovMonTable, #evTable { min-width: 480px; }
 input[type=text], input[type=number], textarea, select {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 8px; font-size: 13px; width: 100%;
@@ -102,11 +105,11 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
       <span class="spacer"></span>
       <button class="ghost" id="atAdd">＋ 添加规则</button>
       <button id="atSave">保存全部</button></div>
-    <table id="atTable"><thead><tr>
-      <th>启用</th><th>群</th><th>重复</th><th>星期(每周)</th><th>时间</th>
+    <div class="tbl-wrap"><table id="atTable"><thead><tr>
+      <th>启用</th><th>群</th><th>重复</th><th>星期(仅每周)</th><th>时间</th>
       <th>对象</th><th>成员</th><th>内容</th><th></th>
-    </tr></thead><tbody></tbody></table>
-    <p class="hint">once = 只执行一次，触发后自动停用；weekly 时按勾选的星期触发；多个时间用英文逗号（09:30,18:00）。</p>
+    </tr></thead><tbody></tbody></table></div>
+    <p class="hint">每天/一次无需勾选星期；weekly 时按勾选的星期触发；once 只执行一次，触发后自动停用；多个时间用英文逗号（09:30,18:00）。</p>
   </section>
 
   <!-- 接龙规则 -->
@@ -115,11 +118,11 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
       <span class="spacer"></span>
       <button class="ghost" id="chAdd">＋ 添加规则</button>
       <button id="chSave">保存全部</button></div>
-    <table id="chTable"><thead><tr>
-      <th>启用</th><th>群</th><th>主题(0.行)</th><th>第一个人(1.行)</th>
-      <th>时间</th><th>重复</th><th>星期(每周)</th><th></th>
-    </tr></thead><tbody></tbody></table>
-    <p class="hint">标题固定白名单词「接龙功能测试：」，自定义主题放「主题」列（发为 0. 行）；时间留空 = 只手动 /发起接龙。</p>
+    <div class="tbl-wrap"><table id="chTable"><thead><tr>
+      <th>启用</th><th>群</th><th>标题内容(0.行)</th><th>第一个人(1.行)</th>
+      <th>时间</th><th>重复</th><th>星期(仅每周)</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+    <p class="hint">发出的固定格式：「📋 接龙功能测试：」+「0. 标题内容」+「1. 第一个人」（实测必须 0./1. 两行才显示「参与接龙」入口）；每天/一次无需勾选星期。</p>
   </section>
 
   <!-- 退群监控 -->
@@ -137,7 +140,17 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
       <textarea id="tplLeave"></textarea></label></div></div>
     <div class="row"><div style="flex:1"><label>入群模板<br>
       <textarea id="tplJoin"></textarea></label></div></div>
-    <p class="hint">变量：{nickname} {wxid} {group} {date} {time} {weekday}</p>
+    <p class="hint">可用变量：</p>
+    <table style="max-width:680px"><thead><tr><th style="width:110px">变量</th><th>说明</th></tr></thead><tbody>
+      <tr><td>{nickname}</td><td>群昵称（群内显示名，取自上一次成员快照）</td></tr>
+      <tr><td>{wxname}</td><td>微信昵称（成员微信资料里的昵称）</td></tr>
+      <tr><td>{wxid}</td><td>微信号 ID（守护进程返回的成员 ID，非用户自定义微信号）</td></tr>
+      <tr><td>{group}</td><td>群名称</td></tr>
+      <tr><td>{time}</td><td>完整时间（2026-11-07 19:30:00，为轮询检测到变动的时间，非微信精确退群时刻）</td></tr>
+      <tr><td>{date}</td><td>日期（2026-11-07）</td></tr>
+      <tr><td>{clock}</td><td>时分（19:30）</td></tr>
+      <tr><td>{weekday}</td><td>星期（如 星期六）</td></tr>
+    </tbody></table>
     <div class="row"><button id="tplSave">保存模板</button></div>
   </section>
 
@@ -266,13 +279,17 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
   // ---------- 定时艾特 ----------
   var WD = ["wd_mon", "wd_tue", "wd_wed", "wd_thu", "wd_fri", "wd_sat", "wd_sun"];
   var WD_NAME = ["一", "二", "三", "四", "五", "六", "日"];
+  function wdCell(r, i) {
+    if (r.repeat !== "weekly") return '<span class="hint">—</span>';
+    return '<div class="wd">' + WD.map(function (k, j) {
+      return '<label><input type="checkbox" data-i="' + i + '" data-wd="' + k + '"' +
+        (r[k] ? " checked" : "") + ">" + WD_NAME[j] + "</label>";
+    }).join("") + "</div>";
+  }
   function renderAt() {
     var tb = $("#atTable tbody");
     tb.innerHTML = atRules.map(function (r, i) {
-      var wd = '<div class="wd">' + WD.map(function (k, j) {
-        return '<label><input type="checkbox" data-i="' + i + '" data-wd="' + k + '"' +
-          (r[k] ? " checked" : "") + ">" + WD_NAME[j] + "</label>";
-      }).join("") + "</div>";
+      var wd = wdCell(r, i);
       return "<tr>" +
         '<td><input type="checkbox" data-i="' + i + '" data-f="enabled"' + (r.enabled !== false ? " checked" : "") + "></td>" +
         '<td><input type="text" data-i="' + i + '" data-f="group_id" list="gidList" value="' + esc(r.group_id) + '" style="min-width:150px"></td>' +
@@ -299,6 +316,7 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
       var evName = (el.tagName === "SELECT" || el.type === "checkbox") ? "change" : "input";
       el.addEventListener(evName, function () {
         atRules[i][f] = el.type === "checkbox" ? el.checked : el.value;
+        if (f === "repeat") renderAt();  // 重复方式切换 → 重绘星期列显隐
       });
     });
     $$('#atTable [data-wd]').forEach(function (el) {
@@ -328,10 +346,7 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
   function renderCh() {
     var tb = $("#chTable tbody");
     tb.innerHTML = chRules.map(function (r, i) {
-      var wd = '<div class="wd">' + WD.map(function (k, j) {
-        return '<label><input type="checkbox" data-i="' + i + '" data-wd="' + k + '"' +
-          (r[k] ? " checked" : "") + ">" + WD_NAME[j] + "</label>";
-      }).join("") + "</div>";
+      var wd = wdCell(r, i);
       return "<tr>" +
         '<td><input type="checkbox" data-i="' + i + '" data-f="enabled"' + (r.enabled !== false ? " checked" : "") + "></td>" +
         '<td><input type="text" data-i="' + i + '" data-f="group_id" list="gidList" value="' + esc(r.group_id) + '" style="min-width:140px"></td>' +
@@ -354,6 +369,7 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
       var evName = (el.tagName === "SELECT" || el.type === "checkbox") ? "change" : "input";
       el.addEventListener(evName, function () {
         chRules[i][f] = el.type === "checkbox" ? el.checked : el.value;
+        if (f === "repeat") renderCh();  // 重复方式切换 → 重绘星期列显隐
       });
     });
     $$('#chTable [data-wd]').forEach(function (el) {
