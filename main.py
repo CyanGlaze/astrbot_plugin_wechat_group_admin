@@ -294,6 +294,33 @@ class WechatGroupAdmin(Star):
             pass
         logger.info(f"[群管] 旧 KV 已迁移到配置面板：任务 +{added} 条，监控群 {len(mons)} 个")
 
+    def _try_capture_client(self) -> bool:
+        """启动/重载后直接从平台管理器抓 wechat_agent 客户端，不必等群里来消息。"""
+        try:
+            pm = getattr(self.context, "platform_manager", None)
+            insts = list(getattr(pm, "platform_insts", []) or [])
+        except Exception:
+            insts = []
+        for plat in insts:
+            name = ""
+            try:
+                meta = plat.meta()
+                name = str(getattr(meta, "name", "") or getattr(meta, "id", "") or "")
+            except Exception:
+                pass
+            if name and name not in PLATFORM_NAMES and "wechat" not in name.lower():
+                continue
+            try:
+                getter = getattr(plat, "get_client", None)
+                client = getter() if getter else getattr(plat, "client", None)
+            except Exception:
+                client = None
+            if client is not None:
+                self.adapter, self.client = plat, client
+                logger.info(f"[群管] 已捕获 wechat_agent 客户端（平台 {name or 'wechat_agent'}）。")
+                return True
+        return False
+
     async def _async_init(self):
         try:
             # 注意：AstrBot 4.x 的 get_kv_data(key, default) 中 default 是必填位置参数。
@@ -304,6 +331,7 @@ class WechatGroupAdmin(Star):
             self.groups = {}
         await self._migrate_kv_to_config()
         self._load_state_from_config()
+        self._try_capture_client()
         self._loop_task = asyncio.create_task(self._loop())
         logger.info(
             f"[群管] 已启动（wechat_agent）。监控群 {len(self.monitored)} 个，"
@@ -343,6 +371,9 @@ class WechatGroupAdmin(Star):
             await asyncio.sleep(20)
 
     async def _tick(self):
+        if self.client is None:
+            # 守护进程晚于插件就绪时自动重试捕获（每轮 20s 一次，开销可忽略）
+            self._try_capture_client()
         now = datetime.now()
         minute_key = now.strftime("%Y-%m-%d %H:%M")
         hhmm = now.strftime("%H:%M")
@@ -791,14 +822,19 @@ class WechatGroupAdmin(Star):
     # WebUI 管理页面（views/dashboard）后端 API
     # ===================================================================
     _WEB_API_PREFIX = "/astrbot_plugin_wechat_group_admin"
+    # 面板可写配置白名单：type + int 范围（与 _conf_schema.json 保持一致）
     _WEB_SAVE_KEYS = {
-        "at_schedules": list,
-        "chain_starters": list,
-        "monitored_groups": list,
-        "leave_template": str,
-        "join_template": str,
-        "poll_interval_min": int,
-        "notify_group": str,
+        "at_schedules": {"type": "list"},
+        "chain_starters": {"type": "list"},
+        "monitored_groups": {"type": "list"},
+        "leave_template": {"type": "str"},
+        "join_template": {"type": "str"},
+        "notify_group": {"type": "str"},
+        "enable": {"type": "bool"},
+        "require_confirm": {"type": "bool"},
+        "poll_interval_min": {"type": "int", "min": 1, "max": 60},
+        "confirm_ttl_sec": {"type": "int", "min": 10, "max": 600},
+        "mutation_wait_sec": {"type": "int", "min": 3, "max": 120},
     }
 
     def _record_event(self, gid: str, gname: str, etype: str, nick: str, wxid: str):
@@ -849,6 +885,10 @@ class WechatGroupAdmin(Star):
             "notify_group": self.config.get("notify_group") or "",
             "leave_template": str(self.config.get("leave_template") or ""),
             "join_template": str(self.config.get("join_template") or ""),
+            "enable": self.config.get("enable", True) is not False,
+            "require_confirm": self.config.get("require_confirm", True) is not False,
+            "confirm_ttl_sec": self.config.get("confirm_ttl_sec", 60),
+            "mutation_wait_sec": self.config.get("mutation_wait_sec", 30),
             "at_schedules": self._rules(),
             "chain_starters": [dict(x) for x in self._cfg_list("chain_starters")],
             "monitored": monitor,
@@ -875,11 +915,12 @@ class WechatGroupAdmin(Star):
         """POST {key, value} 白名单配置保存；列表保存后立即重建内存镜像。"""
         body = await web_request.json(default={}) or {}
         key = str(body.get("key") or "")
-        if key not in self._WEB_SAVE_KEYS:
+        spec = self._WEB_SAVE_KEYS.get(key)
+        if not spec:
             return json_response({"error": f"不支持的配置键：{key}"}, status_code=400)
         value = body.get("value")
-        want = self._WEB_SAVE_KEYS[key]
-        if want is list:
+        t = spec["type"]
+        if t == "list":
             if not isinstance(value, list):
                 return json_response({"error": "value 应为列表"}, status_code=400)
             if key == "monitored_groups":
@@ -889,12 +930,14 @@ class WechatGroupAdmin(Star):
                     self._ensure_tpl_key(key, dict(x))
                     for x in value if isinstance(x, dict)
                 ]
-        elif want is int:
+        elif t == "int":
             try:
-                value = max(1, min(int(value), 60))
+                value = int(value)
             except (TypeError, ValueError):
                 return json_response({"error": "value 应为整数"}, status_code=400)
-            self.config[key] = value
+            self.config[key] = max(spec.get("min", 1), min(value, spec.get("max", 60)))
+        elif t == "bool":
+            self.config[key] = bool(value)
         else:
             self.config[key] = str(value or "")
         ok = await self._save_config()

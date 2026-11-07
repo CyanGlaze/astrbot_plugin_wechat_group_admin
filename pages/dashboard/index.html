@@ -157,15 +157,32 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
 
   <!-- 设置 -->
   <section class="card" id="tab-set">
-    <h3>常规设置</h3>
-    <div class="row"><label style="width:220px">轮询间隔（分钟，1~60）
-      <input type="number" id="setPoll" min="1" max="60"></label>
-      <label style="flex:1">通知群（播报复制发到这里，可空）
-      <input type="text" id="setNotify" list="gidList"></label></div>
-    <div class="row"><button id="setSave">保存</button></div>
+    <h3>全部设置参数</h3>
+    <div class="row">
+      <label style="width:220px">轮询间隔（分钟，1~60）
+        <input type="number" id="setPoll" min="1" max="60"></label>
+      <label style="width:220px">确认有效期（秒，10~600）
+        <input type="number" id="setTtl" min="10" max="600"></label>
+      <label style="width:220px">群变更等待（秒，3~120）
+        <input type="number" id="setWait" min="3" max="120"></label>
+    </div>
+    <div class="row">
+      <label style="flex:1">通知群（播报额外复制发到这里，可空）
+        <input type="text" id="setNotify" list="gidList"></label>
+    </div>
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="setEnable"> 插件总开关（关闭后所有功能停止）</label>
+      <label style="display:flex;align-items:center;gap:6px;margin-left:24px">
+        <input type="checkbox" id="setConfirm"> 破坏性操作需二次确认（/踢人 /退群 /清群公告）</label>
+    </div>
+    <div class="row"><button id="setSave">保存设置</button></div>
     <h3>误报处理</h3>
     <p class="hint">插件已内置三层防误报：名单远小于基线时整轮跳过；差比需连续两轮一致才播报；单轮 ≥30% 变动拦截。
     若仍出现误报，可在「概览」对该群点「重建基线」，下一轮轮询会重新建立成员快照。</p>
+    <h3>其余参数的位置</h3>
+    <p class="hint">定时艾特规则 →「定时艾特」页签；自动接龙规则 →「接龙规则」页签；监控群与播报模板 →「退群监控」页签。
+    以上即全部配置参数，无需再去 WebUI 配置面板。卡片上的「已发现的群」由插件自动维护。</p>
   </section>
 </div>
 <div id="toast"></div>
@@ -435,11 +452,26 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
   function renderSet() {
     $("#setPoll").value = OV.poll_interval_min || 5;
     $("#setNotify").value = OV.notify_group || "";
+    $("#setTtl").value = OV.confirm_ttl_sec != null ? OV.confirm_ttl_sec : 60;
+    $("#setWait").value = OV.mutation_wait_sec != null ? OV.mutation_wait_sec : 30;
+    $("#setEnable").checked = OV.enable !== false;
+    $("#setConfirm").checked = OV.require_confirm !== false;
   }
   $("#setSave").onclick = async function () {
-    await apiPost("save", { key: "poll_interval_min", value: +$("#setPoll").value });
-    await apiPost("save", { key: "notify_group", value: $("#setNotify").value });
-    toast("已保存"); loadOverview();
+    var saves = [
+      ["poll_interval_min", +$("#setPoll").value || 5],
+      ["confirm_ttl_sec", +$("#setTtl").value || 60],
+      ["mutation_wait_sec", +$("#setWait").value || 30],
+      ["notify_group", $("#setNotify").value],
+      ["enable", $("#setEnable").checked],
+      ["require_confirm", $("#setConfirm").checked],
+    ];
+    for (var i = 0; i < saves.length; i++) {
+      var r = await apiPost("save", { key: saves[i][0], value: saves[i][1] });
+      if (!r || r.ok === false) { toast("保存失败：" + saves[i][0]); return; }
+    }
+    toast("设置已保存并生效");
+    loadOverview();
   };
 
   // ---------- 数据加载 / 页签 ----------
