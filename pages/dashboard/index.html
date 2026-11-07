@@ -289,7 +289,7 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
           "</select></td>" +
         '<td><input type="text" data-i="' + i + '" data-f="members" value="' + esc(r.members) + '" style="min-width:110px"></td>' +
         '<td><textarea data-i="' + i + '" data-f="content" style="min-width:150px">' + esc(r.content) + "</textarea></td>" +
-        '<td><button class="mini danger" data-del="' + i + '">删</button></td></tr>";
+        '<td><button class="mini danger" data-del="' + i + '">删</button></td></tr>';
     }).join("") || '<tr><td colspan="9" class="hint">暂无规则，点「添加规则」。</td></tr>';
     bindAtTable();
   }
@@ -344,7 +344,7 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
               ({ daily: "每天", weekly: "每周", once: "一次" }[v]) + "</option>";
           }).join("") + "</select></td>" +
         "<td>" + wd + "</td>" +
-        '<td><button class="mini danger" data-del="' + i + '">删</button></td></tr>";
+        '<td><button class="mini danger" data-del="' + i + '">删</button></td></tr>';
     }).join("") || '<tr><td colspan="8" class="hint">暂无规则，点「添加规则」。</td></tr>';
     bindChTable();
   }
