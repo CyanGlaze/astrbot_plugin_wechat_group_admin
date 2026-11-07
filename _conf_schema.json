@@ -1,0 +1,283 @@
+{
+  "enable": {
+    "type": "bool",
+    "default": true,
+    "description": "插件总开关"
+  },
+  "poll_interval_min": {
+    "type": "int",
+    "default": 5,
+    "description": "退群/入群监控的轮询间隔（分钟，1~60）。间隔越小发现越快，但 wechat_agent 守护进程 API 调用越频繁。"
+  },
+  "leave_template": {
+    "type": "text",
+    "default": "{nickname} 什么时候离开了本群\n微信号：{wxid}\n群昵称：{nickname}\n退群时间：{time}",
+    "description": "退群播报模板（可自由改文字/增删行）。占位符：{nickname} 群昵称、{wxid} 微信号ID、{group} 群、{time} 完整时间、{date} 日期、{clock} 时分、{weekday} 星期。{time} 是轮询检测到的时间，非微信精确退群时刻。",
+    "hint": "微信号字段实际是守护进程返回的成员 ID（wxid），不是用户自定义的微信号；群昵称取自上一次成员快照。"
+  },
+  "join_template": {
+    "type": "text",
+    "default": "{nickname} 什么时候加入了本群\n微信号：{wxid}\n群昵称：{nickname}\n入群时间：{time}",
+    "description": "入群播报模板（结构同退群，可自由改）。占位符同上。",
+    "hint": "入群时间同样是轮询检测到变动的时间。"
+  },
+  "notify_group": {
+    "type": "string",
+    "default": "",
+    "description": "额外接收退群/入群变动通知的群ID（留空=不额外通知）。也可用 /设置通知群 指令设置。",
+    "_special": "umo",
+    "hint": "可从群选择器里选，也可填 xxx@chatroom 或完整会话 ID；留空=不额外通知。/设置通知群 也会回写到这里。"
+  },
+  "monitored_groups": {
+    "type": "list",
+    "_special": "umo",
+    "items": {
+      "type": "string"
+    },
+    "default": [],
+    "description": "👥 退群/入群监控的群（可视化增删）",
+    "hint": "在这里勾选要监控的群，或用 /监控退群 [群id] 添加——命令会自动回写到这里。留空=不监控。可填群 ID 或完整会话 ID。"
+  },
+  "group_options": {
+    "type": "list",
+    "_special": "umo",
+    "items": {
+      "type": "string"
+    },
+    "default": [],
+    "description": "📇 已发现的群（自动维护，可在上方规则里点选）",
+    "hint": "插件在群里收到消息时自动把该群加入此清单，供群选择器使用。一般不用手动改。"
+  },
+  "require_confirm": {
+    "type": "bool",
+    "default": true,
+    "description": "破坏性群管理操作（/踢人、/退群、/清群公告）是否需要二次确认。确认指令为 /确认群管，撤销为 /取消群管。",
+    "hint": "强烈建议保持开启。关闭后这些指令会立即执行，且机器人退群无法自动撤回。"
+  },
+  "confirm_ttl_sec": {
+    "type": "int",
+    "default": 60,
+    "description": "待确认操作的有效期（秒，10~600）。超时自动作废，仅发起人本人可确认。"
+  },
+  "mutation_wait_sec": {
+    "type": "int",
+    "default": 30,
+    "description": "群变更提交后，轮询守护进程 operation 直到终态的最长等待时间（秒，3~120）。超时不代表失败，可用 /群资料 或 /群成员 核对结果。"
+  },
+  "at_schedules": {
+    "type": "template_list",
+    "description": "⏰ 定时艾特规则（在这里可视化增删，保存后立即生效）",
+    "hint": "每条 = 群 + 重复方式（每天/每周勾星期）+ 几点 + 艾特对象 + 内容。聊天里用 /添加艾特任务、/添加艾特成员 创建的规则会自动写回这里，两边一一对应；/删除艾特任务 的序号就是这里的规则序号。保存立即生效。",
+    "default": [],
+    "templates": {
+      "at_schedule": {
+        "name": "定时艾特",
+        "display_item": "group_id",
+        "hide_hint_in_list": true,
+        "items": {
+          "enabled": {
+            "type": "bool",
+            "default": true,
+            "description": "启用这条规则"
+          },
+          "group_id": {
+            "type": "string",
+            "default": "",
+            "description": "群 ID",
+            "hint": "点选已发现的群，或填 57418400291@chatroom（/群列表 可查）。留空的规则会被忽略。",
+            "_special": "umo"
+          },
+          "repeat": {
+            "type": "string",
+            "options": [
+              "daily",
+              "weekly"
+            ],
+            "default": "daily",
+            "description": "重复方式",
+            "hint": "daily = 每天都艾特；weekly = 只在下面勾选的星期几艾特。"
+          },
+          "wd_mon": {
+            "type": "bool",
+            "default": true,
+            "description": "周一",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_tue": {
+            "type": "bool",
+            "default": true,
+            "description": "周二",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_wed": {
+            "type": "bool",
+            "default": true,
+            "description": "周三",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_thu": {
+            "type": "bool",
+            "default": true,
+            "description": "周四",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_fri": {
+            "type": "bool",
+            "default": true,
+            "description": "周五",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_sat": {
+            "type": "bool",
+            "default": false,
+            "description": "周六",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_sun": {
+            "type": "bool",
+            "default": false,
+            "description": "周日",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "time": {
+            "type": "string",
+            "default": "09:30",
+            "description": "几点艾特",
+            "hint": "填 HH:MM，如 09:30；多个时间用英文逗号：09:30,18:00。周期用上面的「重复方式 + 星期」勾选，不用在这里写 mon-fri。（旧写法 mon-fri 09:00 仍兼容）"
+          },
+          "target": {
+            "type": "string",
+            "options": [
+              "all",
+              "members"
+            ],
+            "default": "all",
+            "description": "艾特谁",
+            "hint": "all = @全体成员；members = @指定成员（需填下面的成员）"
+          },
+          "members": {
+            "type": "string",
+            "default": "",
+            "description": "指定成员",
+            "hint": "target=members 时填 wxid 或群昵称，多个用英文逗号分隔；用 /群成员 查 ID。"
+          },
+          "content": {
+            "type": "text",
+            "default": "该交周报了",
+            "description": "艾特内容（可多行）",
+            "hint": "支持变量 {date} {clock} {time} {weekday} {group}"
+          },
+          "note": {
+            "type": "string",
+            "default": "",
+            "description": "备注",
+            "hint": "只给自己看的说明，不会发送。"
+          }
+        }
+      }
+    }
+  },
+  "chain_starters": {
+    "type": "template_list",
+    "description": "📋 自动发起接龙（只发引子，成员点「参与接龙」）",
+    "hint": "插件发送「📋 接龙功能测试：」+ 换行 +「0. 标题内容」+ 换行 +「1. 第一个人」格式纯文本，微信显示「参与接龙」入口。机器人不参与、不统计。实测（2026-11-07）：标题固定白名单词「接龙功能测试：」，自定义标题（如 双十接龙）必须放 0. 行，放标题行不触发；必须 LF 换行且末尾不换行（CRLF 不触发）；#接龙 开头也不触发。守护进程无法生成真接龙卡片(type=49/app=53)，只能由成员点客户端按钮创建。",
+    "default": [],
+    "templates": {
+      "chain_starter": {
+        "name": "发起接龙",
+        "display_item": "topic",
+        "hide_hint_in_list": true,
+        "items": {
+          "enabled": {
+            "type": "bool",
+            "default": true,
+            "description": "启用这条规则"
+          },
+          "group_id": {
+            "type": "string",
+            "_special": "umo",
+            "default": "",
+            "description": "群",
+            "hint": "点选已发现的群，或填 xxx@chatroom。不带群id的命令默认当前群。"
+          },
+          "topic": {
+            "type": "string",
+            "default": "双十接龙",
+            "description": "0. 自定义标题内容",
+            "hint": "显示在「0. 」之后作为接龙标题/主题（如 双十接龙）。消息标题固定为白名单词「接龙功能测试：」，自定义标题必须放这里（0. 行），放标题行不触发。"
+          },
+          "first_item": {
+            "type": "string",
+            "default": "太华红豆糕",
+            "description": "1. 自定义第一个人",
+            "hint": "显示在「1. 」之后作为接龙第一个条目（如 太华红豆糕）。成员点「参与接龙」后基于它继续添加。"
+          },
+          "time": {
+            "type": "string",
+            "default": "",
+            "description": "几点自动发起",
+            "hint": "HH:MM，可逗号多个（09:00,18:00）；留空=只用 /发起接龙 手动发起。"
+          },
+          "repeat": {
+            "type": "string",
+            "options": [
+              "daily",
+              "weekly"
+            ],
+            "default": "daily",
+            "description": "重复方式",
+            "hint": "daily=每天；weekly=按下面勾选的星期。"
+          },
+          "wd_mon": {
+            "type": "bool",
+            "default": true,
+            "description": "周一",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_tue": {
+            "type": "bool",
+            "default": true,
+            "description": "周二",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_wed": {
+            "type": "bool",
+            "default": true,
+            "description": "周三",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_thu": {
+            "type": "bool",
+            "default": true,
+            "description": "周四",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_fri": {
+            "type": "bool",
+            "default": true,
+            "description": "周五",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_sat": {
+            "type": "bool",
+            "default": false,
+            "description": "周六",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "wd_sun": {
+            "type": "bool",
+            "default": false,
+            "description": "周日",
+            "hint": "重复方式=weekly 时生效"
+          },
+          "note": {
+            "type": "string",
+            "default": "",
+            "description": "备注",
+            "hint": "只给自己看。"
+          }
+        }
+      }
+    }
+  }
+}

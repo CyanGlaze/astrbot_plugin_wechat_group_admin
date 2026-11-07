@@ -1,0 +1,19 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ===== AstrBot 插件运行时数据（非源码）=====
+data/cmd_config.json
+data/temp/
+
+# ===== 构建产物 =====
+*.zip
+
+# ===== 编辑器 / 系统 =====
+.DS_Store
+.vscode/
+.idea/
+*.swp
