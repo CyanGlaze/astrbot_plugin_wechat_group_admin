@@ -131,10 +131,12 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
       <span class="spacer"></span><button id="monSave">保存</button></div>
     <div id="monList"></div>
     <div class="row">
-      <input type="text" id="monNew" placeholder="群 ID（xxx@chatroom），可从下拉选" list="gidList" style="max-width:340px">
+      <select id="monNew" style="max-width:300px">
+        <option value="">选择群…</option>
+      </select>
+      <button class="ghost" id="gidRefresh">🔄 从微信刷新群列表</button>
       <button class="ghost" id="monAdd">＋ 添加</button>
     </div>
-    <datalist id="gidList"></datalist>
     <h3>播报模板</h3>
     <div class="row"><div style="flex:1"><label>退群模板<br>
       <textarea id="tplLeave"></textarea></label></div></div>
@@ -181,7 +183,7 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
     </div>
     <div class="row">
       <label style="flex:1">通知群（播报额外复制发到这里，可空）
-        <input type="text" id="setNotify" list="gidList"></label>
+        <select id="setNotify"></select></label>
     </div>
     <div class="row">
       <label style="display:flex;align-items:center;gap:6px">
@@ -228,8 +230,25 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
   function gidLabel(gid) {
     if (!OV) return gid;
     for (var i = 0; i < (OV.groups || []).length; i++)
-      if (OV.groups[i].gid === gid && OV.groups[i].name) return OV.groups[i].name + "（" + gid + "）";
+      if (OV.groups[i].gid === gid && OV.groups[i].name) return OV.groups[i].name;
     return gid;
+  }
+  function allGids() {   // 下拉候选：已知群 + 规则/监控里出现过的群
+    var seen = {}, out = [];
+    function add(g) { g = normGid(g); if (g && !seen[g]) { seen[g] = 1; out.push(g); } }
+    (OV.groups || []).forEach(function (g) { add(g.gid); });
+    (OV.monitored || []).forEach(function (m) { add(m.gid); });
+    (atRules || []).concat(chRules || []).forEach(function (r) { add(r.group_id); });
+    return out;
+  }
+  function groupOptionsHTML(selected) {
+    var gids = allGids();
+    selected = normGid(selected);
+    if (selected && gids.indexOf(selected) < 0) gids.unshift(selected);
+    return gids.map(function (g) {
+      return '<option value="' + esc(g) + '"' + (g === selected ? " selected" : "") + ">" +
+        esc(gidLabel(g)) + "</option>";
+    }).join("");
   }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   async function getBridge() {
@@ -288,11 +307,13 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
   }
   function renderAt() {
     var tb = $("#atTable tbody");
+    atRules.forEach(function (r) { r.group_id = normGid(r.group_id); });
     tb.innerHTML = atRules.map(function (r, i) {
       var wd = wdCell(r, i);
       return "<tr>" +
         '<td><input type="checkbox" data-i="' + i + '" data-f="enabled"' + (r.enabled !== false ? " checked" : "") + "></td>" +
-        '<td><input type="text" data-i="' + i + '" data-f="group_id" list="gidList" value="' + esc(r.group_id) + '" style="min-width:150px"></td>' +
+        '<td><select data-i="' + i + '" data-f="group_id" style="min-width:150px">' +
+          '<option value="">选择群…</option>' + groupOptionsHTML(r.group_id) + "</select></td>" +
         '<td><select data-i="' + i + '" data-f="repeat">' +
           ["daily", "weekly", "once"].map(function (v) {
             return "<option value=" + v + (r.repeat === v ? " selected" : "") + ">" +
@@ -337,7 +358,10 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
     renderAt();
   };
   $("#atSave").onclick = async function () {
-    var r = await apiPost("save", { key: "at_schedules", value: atRules });
+    var payload = atRules.map(function (r) {
+      var c = Object.assign({}, r); c.group_id = normGid(c.group_id); return c;
+    });
+    var r = await apiPost("save", { key: "at_schedules", value: payload });
     toast(r && r.ok !== false ? "已保存并生效" : "保存失败");
     loadOverview();
   };
@@ -345,11 +369,13 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
   // ---------- 接龙规则 ----------
   function renderCh() {
     var tb = $("#chTable tbody");
+    chRules.forEach(function (r) { r.group_id = normGid(r.group_id); });
     tb.innerHTML = chRules.map(function (r, i) {
       var wd = wdCell(r, i);
       return "<tr>" +
         '<td><input type="checkbox" data-i="' + i + '" data-f="enabled"' + (r.enabled !== false ? " checked" : "") + "></td>" +
-        '<td><input type="text" data-i="' + i + '" data-f="group_id" list="gidList" value="' + esc(r.group_id) + '" style="min-width:140px"></td>' +
+        '<td><select data-i="' + i + '" data-f="group_id" style="min-width:140px">' +
+          '<option value="">选择群…</option>' + groupOptionsHTML(r.group_id) + "</select></td>" +
         '<td><input type="text" data-i="' + i + '" data-f="topic" value="' + esc(r.topic) + '" style="min-width:110px"></td>' +
         '<td><input type="text" data-i="' + i + '" data-f="first_item" value="' + esc(r.first_item) + '" style="min-width:110px"></td>' +
         '<td><input type="text" data-i="' + i + '" data-f="time" value="' + esc(r.time) + '" style="width:90px"></td>' +
@@ -390,7 +416,10 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
     renderCh();
   };
   $("#chSave").onclick = async function () {
-    var r = await apiPost("save", { key: "chain_starters", value: chRules });
+    var payload = chRules.map(function (r) {
+      var c = Object.assign({}, r); c.group_id = normGid(c.group_id); return c;
+    });
+    var r = await apiPost("save", { key: "chain_starters", value: payload });
     toast(r && r.ok !== false ? "已保存并生效" : "保存失败");
     loadOverview();
   };
@@ -414,26 +443,28 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
     });
     $("#tplLeave").value = OV.leave_template || "";
     $("#tplJoin").value = OV.join_template || "";
-    $("#monNew").value = "";
-    var dl = $("#gidList");
-    var seen = {};
-    dl.innerHTML = [].concat(OV.groups || [], (OV.group_options || []).map(function (u) {
-      return { gid: normGid(u), name: "" };
-    })).filter(function (g) {
-      if (!g.gid || seen[g.gid]) return false; seen[g.gid] = 1; return true;
-    }).map(function (g) {
-      return '<option value="' + esc(g.gid) + '">' + esc(g.name || "") + "</option>";
-    }).join("");
+    $("#monNew").innerHTML = '<option value="">选择群…</option>' + groupOptionsHTML("");
   }
   $("#monAdd").onclick = async function () {
     var g = normGid($("#monNew").value);
-    if (!g) { toast("请填群 ID"); return; }
+    if (!g) { toast("请先选择群"); return; }
     var gids = (OV.monitored || []).map(function (m) { return m.gid; });
     if (gids.indexOf(g) >= 0) { toast("已在监控列表"); return; }
     gids.push(g);
     var r = await apiPost("save", { key: "monitored_groups", value: gids });
     toast(r && r.ok !== false ? "已添加" : "保存失败");
     loadOverview();
+  };
+  $("#gidRefresh").onclick = async function () {
+    try {
+      var r = await apiPost("refresh_groups", {});
+      if (r && typeof r.count === "number" && r.count > 0) {
+        toast("已从微信同步 " + r.count + " 个群");
+        loadOverview();
+      } else {
+        toast((r && r.error) || "未同步到群聊（确认微信客户端在线、群聊已打开过）");
+      }
+    } catch (e) { toast("刷新失败：" + e.message); }
   };
   $("#monSave").onclick = async function () {
     toast("监控群列表无需手动保存（增删即保存）");
@@ -467,11 +498,12 @@ input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
   // ---------- 设置 ----------
   function renderSet() {
     $("#setPoll").value = OV.poll_interval_min || 5;
-    $("#setNotify").value = OV.notify_group || "";
     $("#setTtl").value = OV.confirm_ttl_sec != null ? OV.confirm_ttl_sec : 60;
     $("#setWait").value = OV.mutation_wait_sec != null ? OV.mutation_wait_sec : 30;
     $("#setEnable").checked = OV.enable !== false;
     $("#setConfirm").checked = OV.require_confirm !== false;
+    $("#setNotify").innerHTML = '<option value="">（不额外通知）</option>' +
+      groupOptionsHTML(normGid(OV.notify_group || ""));
   }
   $("#setSave").onclick = async function () {
     var saves = [

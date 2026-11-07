@@ -165,6 +165,7 @@ class WechatGroupAdmin(Star):
         self._last_send_error: str = ""
         self._pending: Dict[str, Dict[str, Any]] = {}   # 破坏性操作的待确认记录
         self._events: deque = deque(maxlen=500)         # 退群/入群/拦截事件（内存，重启清空）
+        self._last_groups_fetch: float = 0              # 上次从微信拉群列表的时间
         self._loop_task: Optional[asyncio.Task] = None
         self._register_web_apis()                        # views/dashboard 管理页后端 API
         asyncio.create_task(self._async_init())
@@ -879,6 +880,7 @@ class WechatGroupAdmin(Star):
             self.context.register_web_api(f"{p}/events", self.web_events, ["GET"], "群管-事件记录")
             self.context.register_web_api(f"{p}/save", self.web_save, ["POST"], "群管-保存配置")
             self.context.register_web_api(f"{p}/rebuild", self.web_rebuild, ["POST"], "群管-重建成员基线")
+            self.context.register_web_api(f"{p}/refresh_groups", self.web_refresh_groups, ["POST"], "群管-从微信刷新群列表")
         except Exception as e:
             logger.warning(f"[群管] 注册 Web API 失败（不影响其它功能）：{e}")
 
@@ -891,8 +893,38 @@ class WechatGroupAdmin(Star):
             rule.setdefault("__template_key", "chain_starter")
         return rule
 
+    async def _refresh_group_names(self) -> int:
+        """从守护进程拉真实群列表，把群名写进 self.groups 并持久化（面板下拉用）。"""
+        ok, data = await self._read("groups", {"limit": 200})
+        if not ok:
+            return 0
+        n = 0
+        for g in self._items(data):
+            gid = self._normalize_gid(g.get("id") or g.get("threadId") or "")
+            if not gid:
+                continue
+            name = str(g.get("displayName") or g.get("name") or "").strip()
+            info = self.groups.setdefault(
+                gid, {"umo": None, "thread_id": _normalize_chatroom(gid), "name": ""}
+            )
+            if name:
+                info["name"] = name
+            n += 1
+        self._last_groups_fetch = time.time()
+        if n:
+            try:
+                await self.put_kv_data(KV_GROUPS, self.groups)
+            except Exception:
+                pass
+        return n
+
     async def web_overview(self):
         """GET 面板总览：状态 + 配置列表 + 监控快照概况。"""
+        if self.client is not None and time.time() - self._last_groups_fetch > 300:
+            try:
+                await self._refresh_group_names()   # 面板打开时自动补群名（5 分钟节流）
+            except Exception as e:
+                logger.debug(f"[群管] 自动刷新群列表失败：{e}")
         monitor = []
         for g in self._monitored_from_config():
             snap = self.snapshots.get(g) or {}
@@ -979,6 +1011,18 @@ class WechatGroupAdmin(Star):
         self._pending_diff.pop(gid, None)
         logger.info(f"[群管] 已清除群 {gid} 的成员基线，下一轮轮询重建。")
         return json_response({"ok": True, "group": gid})
+
+    async def web_refresh_groups(self):
+        """POST 从微信（守护进程）拉群列表，更新群名供面板下拉显示。"""
+        if self.client is None:
+            return json_response({"error": "客户端未连接"}, status_code=400)
+        n = await self._refresh_group_names()
+        return json_response({
+            "ok": bool(n),
+            "count": n,
+            "groups": [{"gid": k, "name": (v or {}).get("name") or ""}
+                       for k, v in self.groups.items()],
+        })
 
     # ===================================================================
     # 发送
