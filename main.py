@@ -49,6 +49,7 @@ KV_MONITORED = "wxga_monitored"
 KV_SCHEDULES = "wxga_schedules"
 KV_NOTIFY = "wxga_notify_group"
 KV_GROUPS = "wxga_groups"
+KV_EVENTS = "wxga_events"
 
 _RE_TIME_ONLY = re.compile(r"^(\d{1,2}):(\d{2})$")
 _RE_TIME_DOW = re.compile(r"^([\w,\-]+)\s+(\d{1,2}):(\d{2})$")
@@ -164,7 +165,7 @@ class WechatGroupAdmin(Star):
         self._warned_no_client = False
         self._last_send_error: str = ""
         self._pending: Dict[str, Dict[str, Any]] = {}   # 破坏性操作的待确认记录
-        self._events: deque = deque(maxlen=500)         # 退群/入群/拦截事件（内存，重启清空）
+        self._events: deque = deque(maxlen=500)         # 事件记录（持久化到 KV，重启不丢）
         self._last_groups_fetch: float = 0              # 上次从微信拉群列表的时间
         self._loop_task: Optional[asyncio.Task] = None
         self._register_web_apis()                        # views/dashboard 管理页后端 API
@@ -341,6 +342,9 @@ class WechatGroupAdmin(Star):
             # 注意：AstrBot 4.x 的 get_kv_data(key, default) 中 default 是必填位置参数。
             # 热重载后仍需能主动发消息，群会话映射继续走 KV。
             self.groups = (await self.get_kv_data(KV_GROUPS, {})) or {}
+            saved_events = (await self.get_kv_data(KV_EVENTS, [])) or []
+            if isinstance(saved_events, list):
+                self._events.extend(saved_events[-500:])
         except Exception as e:
             logger.warning(f"[群管] 读取 KV 失败：{e}")
             self.groups = {}
@@ -351,7 +355,7 @@ class WechatGroupAdmin(Star):
         logger.info(
             f"[群管] 已启动（wechat_agent）。监控群 {len(self.monitored)} 个，"
             f"定时艾特 {len(self.schedules)} 个（数据源=配置面板），"
-            f"退群轮询 {self._poll_interval()} 分钟。"
+            f"退群轮询 {self._poll_interval()} 秒。"
         )
 
     async def terminate(self):
@@ -371,19 +375,26 @@ class WechatGroupAdmin(Star):
         logger.info("[群管] 已停止后台调度循环。")
 
     def _poll_interval(self) -> int:
+        """退群轮询间隔（秒）。优先 poll_interval_sec，兼容旧 poll_interval_min（分钟）。"""
         try:
-            return max(1, min(int(self._opts.get("poll_interval_min", 5) or 5), 60))
+            sec = self._opts.get("poll_interval_sec")
+            if sec is not None:
+                return max(5, min(int(sec), 300))
         except (TypeError, ValueError):
-            return 5
+            pass
+        try:
+            return max(5, min(int(self._opts.get("poll_interval_min", 5) or 5) * 60, 300))
+        except (TypeError, ValueError):
+            return 10
 
     async def _loop(self):
-        """单一调度循环：每 20 秒检查定时任务 + 按间隔做退群轮询。无第三方依赖。"""
+        """单一调度循环：每 5 秒检查定时任务 + 按秒级间隔做退群轮询。无第三方依赖。"""
         while True:
             try:
                 await self._tick()
             except Exception as e:
                 logger.error(f"[群管] 调度循环异常：{e}")
-            await asyncio.sleep(20)
+            await asyncio.sleep(5)
 
     async def _tick(self):
         if self._opts.get("enable") is False:
@@ -432,7 +443,7 @@ class WechatGroupAdmin(Star):
             except Exception as e:
                 logger.error(f"[群管] 定时发起接龙失败：{e}")
 
-        if self.monitored and time.time() - self._last_poll >= self._poll_interval() * 60:
+        if self.monitored and time.time() - self._last_poll >= self._poll_interval():
             self._last_poll = time.time()
             await self._poll_once()
 
@@ -846,14 +857,14 @@ class WechatGroupAdmin(Star):
                                  wxname=prev_wx.get(w, ""), **tvars)
                 await self._send_to_group(gid, [Plain(text)])
                 logger.info(f"[群管] 退群 -> 群 {gid} / {nick}({w})")
-                self._record_event(gid, gname, "leave", nick, w)
+                await self._record_event(gid, gname, "leave", nick, w)
             for w in sorted(confirm_joined):
                 nick = curr.get(w, w)
                 text = self._fmt(join_tpl, nickname=nick, wxid=w, group=gname,
                                  wxname=wxnames.get(w, ""), **tvars)
                 await self._send_to_group(gid, [Plain(text)])
                 logger.info(f"[群管] 入群 -> 群 {gid} / {nick}({w})")
-                self._record_event(gid, gname, "join", nick, w)
+                await self._record_event(gid, gname, "join", nick, w)
 
             self.snapshots[gid] = curr
             self.snapshots_wx[gid] = wxnames
@@ -875,12 +886,13 @@ class WechatGroupAdmin(Star):
         "enable": {"type": "bool"},
         "require_confirm": {"type": "bool"},
         "poll_interval_min": {"type": "int", "min": 1, "max": 60},
+        "poll_interval_sec": {"type": "int", "min": 5, "max": 300},
         "confirm_ttl_sec": {"type": "int", "min": 10, "max": 600},
         "mutation_wait_sec": {"type": "int", "min": 3, "max": 120},
     }
 
-    def _record_event(self, gid: str, gname: str, etype: str, nick: str, wxid: str):
-        """记录退群/入群/拦截事件，供管理页「事件记录」展示。"""
+    async def _record_event(self, gid: str, gname: str, etype: str, nick: str, wxid: str):
+        """记录退群/入群事件，供管理页展示；同步持久化到 KV，重启不丢。"""
         self._events.append({
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "group": gname or gid,
@@ -889,6 +901,10 @@ class WechatGroupAdmin(Star):
             "nickname": nick,
             "wxid": wxid,
         })
+        try:
+            await self.put_kv_data(KV_EVENTS, list(self._events))
+        except Exception as e:
+            logger.debug(f"[群管] 事件持久化失败：{e}")
 
     def _register_web_apis(self):
         """给 views/dashboard 管理页注册后端 API（前端经 bridge apiGet/apiPost 调用）。"""
@@ -954,7 +970,8 @@ class WechatGroupAdmin(Star):
             })
         return json_response({
             "client_ready": self.client is not None,
-            "poll_interval_min": self._poll_interval(),
+            "poll_interval_min": self._poll_interval(),  # 实际秒数（兼容旧前端字段名）
+            "poll_interval_sec": self._poll_interval(),
             "notify_group": self._opts.get("notify_group") or "",
             "leave_template": str(self._opts.get("leave_template") or ""),
             "join_template": str(self._opts.get("join_template") or ""),
@@ -975,7 +992,7 @@ class WechatGroupAdmin(Star):
         })
 
     async def web_events(self):
-        """GET ?limit=N 最近事件记录（内存环形缓冲，重启清空）。"""
+        """GET ?limit=N 最近事件记录（持久化到 KV，重启不丢）。"""
         try:
             limit = max(1, min(int(web_request.query.get("limit", 200) or 200), 500))
         except (TypeError, ValueError):
