@@ -725,25 +725,34 @@ class WechatGroupAdmin(Star):
                 names[str(mid)] = str(nm)
                 wxnames[str(mid)] = str(m.get("nickname") or m.get("displayName") or nm)
 
-        # 1) wechat_agent 的 group_lookup（最可靠，直接读 contact.db）
+        # 1) lookup 优先：直接读 contact.db，退群后实时反映（members 接口有缓存会滞后）。
+        #    wechat_agent 有 group_lookup 封装；wechat_native 需用底层 _request 打端点。
         lookup = getattr(client, "group_lookup", None)
         if lookup:
             try:
                 absorb(self._member_items(await lookup(thread_id)))
             except Exception as e:
                 logger.debug(f"[群管] group_lookup 拉取失败({thread_id})：{e}")
-            if names:
-                return names, wxnames, "group_lookup"
+        else:
+            req = getattr(client, "_request", None)
+            prefix = getattr(client, "prefix", "")
+            if req and prefix:
+                try:
+                    from urllib.parse import quote as _q
+                    data = await req("GET", f"{prefix}/groups/{_q(str(thread_id), safe='')}/lookup")
+                    absorb(self._member_items(data))
+                except Exception as e:
+                    logger.debug(f"[群管] lookup 拉取失败({thread_id})：{e}")
+        if names:
+            return names, wxnames, "group_lookup"
 
-        # 2) group_members：先按 native 签名带 limit/cursor 调用，TypeError 再回退无参
+        # 2) members 兜底（lookup 为空时）：native 带 limit/cursor 翻页；agent 无参。
         members_fn = getattr(client, "group_members", None)
         if members_fn:
-            native_ok = False
             cursor = ""
             for _ in range(20):  # 最多 20 页，防死循环
                 try:
                     data = await members_fn(thread_id, limit=50, cursor=cursor)
-                    native_ok = True
                 except TypeError:
                     # wechat_agent: group_members(group_id) 不接受 limit
                     try:
@@ -754,8 +763,6 @@ class WechatGroupAdmin(Star):
                 except Exception as e:
                     logger.debug(f"[群管] group_members(native) 拉取失败({thread_id})：{e}")
                     break
-                if not native_ok:
-                    break
                 items = self._member_items(data)
                 absorb(items)
                 next_cursor = data.get("nextCursor") if isinstance(data, dict) else None
@@ -764,20 +771,6 @@ class WechatGroupAdmin(Star):
                 cursor = next_cursor
             if names:
                 return names, wxnames, "group_members"
-
-            # 3) wechat_native 兜底：members 为空时直接打 groups/{gid}/lookup
-            #    （native client 未封装 lookup，但 daemon 支持，读 contact.db 更全）
-            req = getattr(client, "_request", None)
-            prefix = getattr(client, "prefix", "")
-            if req and prefix:
-                try:
-                    from urllib.parse import quote as _q
-                    data = await req("GET", f"{prefix}/groups/{_q(str(thread_id), safe='')}/lookup")
-                    absorb(self._member_items(data))
-                except Exception as e:
-                    logger.debug(f"[群管] lookup 兜底失败({thread_id})：{e}")
-            if names:
-                return names, wxnames, "lookup_fallback"
         return {}, {}, ""
 
     async def _poll_once(self):
