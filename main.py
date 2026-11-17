@@ -803,13 +803,6 @@ class WechatGroupAdmin(Star):
             prev_wx = self.snapshots_wx.get(gid) or {}
             prev_source = self.snapshot_source.get(gid)
             rebuild = prev is None
-            if not rebuild and len(curr) < len(prev) * 0.7:
-                # 防线1：名单远小于基线 → 多半是接口截断。整轮跳过：不播报、不更新基线、不动候选。
-                logger.warning(
-                    f"[群管] 群 {gid} 本轮成员数 {len(curr)} 远少于基线 {len(prev)}，"
-                    "疑似接口截断，跳过本轮（不播报不更新基线）。"
-                )
-                continue
             if not rebuild and prev_source and source and prev_source != source:
                 # 修正：守护进程会在 group_lookup / group_members 之间来回切换。
                 # 旧逻辑一换来源就重建基线，导致成员变动被吞掉、监控永不报警。
@@ -843,31 +836,6 @@ class WechatGroupAdmin(Star):
             pend = self._pending_diff.get(gid) or {}
             confirm_left = set(pend.get("left") or ()) & left
             confirm_joined = set(pend.get("joined") or ()) & joined
-
-            # 防线3：单轮大规模变动（≥30%）不可信（接口口径漂移/截断），拦截不播报；
-            # 连续 3 轮仍如此才接受现实、重建基线。
-            cap = max(1, int(len(prev) * 0.3))
-            if len(confirm_left) >= cap or len(confirm_joined) >= cap:
-                hits = int(pend.get("hits") or 0) + 1
-                self._pending_diff[gid] = {"left": left, "joined": joined, "hits": hits}
-                if hits >= 3:
-                    self.snapshots[gid] = curr
-                    self.snapshot_source[gid] = source
-                    self._pending_diff.pop(gid, None)
-                    logger.warning(
-                        f"[群管] 群 {gid} 连续 {hits} 轮大规模成员变动"
-                        f"（缺 {len(left)}/增 {len(joined)}），接受现实并重建基线 {len(curr)} 人。"
-                    )
-                else:
-                    logger.warning(
-                        f"[群管] 群 {gid} 疑似异常差比（缺 {len(left)}/增 {len(joined)}，"
-                        f"基线 {len(prev)}），已拦截不播报，待下轮确认。"
-                    )
-                    self._record_event(
-                        gid, info.get("name") or gid, "blocked",
-                        f"疑似误报已拦截（缺{len(left)}/增{len(joined)}）", "",
-                    )
-                continue
 
             if not confirm_left and not confirm_joined:
                 # 防线2：首次发现差比 → 只记候选，下一轮仍缺/仍在才播报（防接口抖动误报）。
