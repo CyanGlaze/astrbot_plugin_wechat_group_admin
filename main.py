@@ -44,7 +44,7 @@ from astrbot.api.message_components import At, AtAll, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.web import json_response, request as web_request
 
-PLATFORM_NAMES = {"wechat_agent", "wechat", "gewechat"}
+PLATFORM_NAMES = {"wechat_agent", "wechat_native", "wechat", "gewechat"}
 KV_MONITORED = "wxga_monitored"
 KV_SCHEDULES = "wxga_schedules"
 KV_NOTIFY = "wxga_notify_group"
@@ -331,7 +331,8 @@ class WechatGroupAdmin(Star):
                 client = None
             if client is not None:
                 self.adapter, self.client = plat, client
-                logger.info(f"[群管] 已捕获 wechat_agent 客户端（平台 {name or 'wechat_agent'}）。")
+                logger.info(f"[群管] 已捕获微信客户端（平台 {name or 'wechat'}，"
+                            f"类型 {type(client).__name__}）。")
                 return True
         return False
 
@@ -693,34 +694,90 @@ class WechatGroupAdmin(Star):
     # ===================================================================
     # 退群 / 入群监控（轮询差比）
     # ===================================================================
+    @staticmethod
+    def _member_items(data) -> List[dict]:
+        """兼容两种返回：wechat_agent 直接 list；wechat_native dict{items:[...]}。"""
+        if isinstance(data, dict):
+            data = data.get("items", [])
+        return [m for m in (data or []) if isinstance(m, dict)]
+
     async def _fetch_members(self, thread_id: str):
-        """返回 (成员字典, 微信昵称字典, 使用的接口名)。group_lookup 更可靠，优先用。"""
-        fetchers = []
-        if self.client is not None:
-            for name in ("group_lookup", "group_members"):
-                fn = getattr(self.client, name, None)
-                if fn:
-                    fetchers.append((name, fn))
-        for name, fn in fetchers:
-            try:
-                items = await fn(thread_id)
-            except Exception as e:
-                logger.debug(f"[群管] {name} 拉取失败({thread_id})：{e}")
-                continue
-            members: Dict[str, str] = {}
-            wxnames: Dict[str, str] = {}
-            for m in items or []:
-                if not isinstance(m, dict):
-                    continue
+        """返回 (成员字典, 微信昵称字典, 使用的接口名)。
+
+        兼容两个适配器：
+          - wechat_agent：group_lookup(group_id) -> list；无 limit 参数
+          - wechat_native：只有 group_members(thread, limit=, cursor=) -> dict{items,nextCursor}；
+            limit 必填(<=50)，无 group_lookup，需翻页，并过滤 deleted。
+        """
+        if self.client is None:
+            return {}, {}, ""
+        client = self.client
+        names: Dict[str, str] = {}
+        wxnames: Dict[str, str] = {}
+
+        def absorb(items):
+            for m in items:
                 mid = m.get("id") or m.get("userId") or m.get("username")
-                if not mid:
+                if not mid or m.get("deleted") is True:
                     continue
                 nm = (m.get("roomDisplayName") or m.get("displayName")
                       or m.get("mentionName") or m.get("nickname") or mid)
-                members[str(mid)] = str(nm)
+                names[str(mid)] = str(nm)
                 wxnames[str(mid)] = str(m.get("nickname") or m.get("displayName") or nm)
-            if members:
-                return members, wxnames, name
+
+        # 1) wechat_agent 的 group_lookup（最可靠，直接读 contact.db）
+        lookup = getattr(client, "group_lookup", None)
+        if lookup:
+            try:
+                absorb(self._member_items(await lookup(thread_id)))
+            except Exception as e:
+                logger.debug(f"[群管] group_lookup 拉取失败({thread_id})：{e}")
+            if names:
+                return names, wxnames, "group_lookup"
+
+        # 2) group_members：先按 native 签名带 limit/cursor 调用，TypeError 再回退无参
+        members_fn = getattr(client, "group_members", None)
+        if members_fn:
+            native_ok = False
+            cursor = ""
+            for _ in range(20):  # 最多 20 页，防死循环
+                try:
+                    data = await members_fn(thread_id, limit=50, cursor=cursor)
+                    native_ok = True
+                except TypeError:
+                    # wechat_agent: group_members(group_id) 不接受 limit
+                    try:
+                        absorb(self._member_items(await members_fn(thread_id)))
+                    except Exception as e:
+                        logger.debug(f"[群管] group_members 拉取失败({thread_id})：{e}")
+                    break
+                except Exception as e:
+                    logger.debug(f"[群管] group_members(native) 拉取失败({thread_id})：{e}")
+                    break
+                if not native_ok:
+                    break
+                items = self._member_items(data)
+                absorb(items)
+                next_cursor = data.get("nextCursor") if isinstance(data, dict) else None
+                if not next_cursor or next_cursor == cursor or not items:
+                    break
+                cursor = next_cursor
+            if names:
+                return names, wxnames, "group_members"
+
+            # 3) wechat_native 兜底：members 为空时直接打 groups/{gid}/lookup
+            #    （native client 未封装 lookup，但 daemon 支持，读 contact.db 更全）
+            req = getattr(client, "_request", None)
+            prefix = getattr(client, "prefix", "")
+            if req and prefix:
+                try:
+                    from urllib.parse import quote as _q
+                    data = await req("GET", f"{prefix}/groups/{_q(str(thread_id), safe='')}/lookup")
+                    absorb(self._member_items(data))
+                except Exception as e:
+                    logger.debug(f"[群管] lookup 兜底失败({thread_id})：{e}")
+            if names:
+                return names, wxnames, "lookup_fallback"
         return {}, {}, ""
 
     async def _poll_once(self):
